@@ -21,10 +21,10 @@ MONTHS = {
 }
 MONTH_PATTERN = "|".join(sorted((re.escape(value) for value in MONTHS), key=len, reverse=True))
 DATE_PATTERNS = (
-    re.compile(r"(?<!\d)(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)"),
-    re.compile(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})(?!\d)"),
-    re.compile(rf"(?<![\w])([0-3]?\d)(?:st|nd|rd|th)?\s+({MONTH_PATTERN})\s*,?\s*(20\d{{2}})(?!\d)", re.I),
-    re.compile(rf"(?<![\w])({MONTH_PATTERN})\s+([0-3]?\d)(?:st|nd|rd|th)?,?\s+(20\d{{2}})(?!\d)", re.I),
+    re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)"),
+    re.compile(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?!\d)"),
+    re.compile(rf"(?<![\w])([0-3]?\d)(?:st|nd|rd|th)?\s+({MONTH_PATTERN})\s*,?\s*(\d{{4}})(?!\d)", re.I),
+    re.compile(rf"(?<![\w])({MONTH_PATTERN})\s+([0-3]?\d)(?:st|nd|rd|th)?,?\s+(\d{{4}})(?!\d)", re.I),
 )
 
 

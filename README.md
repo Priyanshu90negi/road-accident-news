@@ -1,4 +1,4 @@
-# Dehradun road-accident news (2025)
+# Dehradun road-accident data management
 
 ## Manual article collection and review
 
@@ -8,8 +8,8 @@ into a Streamlit form. It stores the unchanged source article in a dedicated
 records for human review, and exports structured records as UTF-8-with-BOM CSV.
 It does not require article scraping or a paid NLP service. Missing figures stay
 blank (SQLite `NULL`); an explicitly reported zero remains `0`. Possible
-cross-outlet incident duplicates and records outside the 2025 Dehradun scope
-are flagged for review.
+cross-outlet incident duplicates and records outside the Dehradun district are
+flagged for review.
 
 Start the manual app from the project directory:
 
@@ -18,11 +18,24 @@ Start the manual app from the project directory:
 .\.venv\Scripts\streamlit.exe run .\app.py
 ```
 
-The app creates `accident_news.db` beside `app.py`. Set `ACCIDENT_NEWS_DB` to
-use a different database path. CSV exports are written to
-`data/exports/accident_records.csv`; the download control also serves the file
-from the app. The default export includes all records; choose verified-only in
-the app to limit the export.
+The app uses the existing central `accident_news.db` beside `app.py`. Set
+`ACCIDENT_NEWS_DB` to use a different database path. On first use, the app
+migrates the existing empty or populated manual database without dropping its
+article or accident records.
+
+In **Yearly data**, choose whether a table filter uses accident occurrence year
+(derived from `accident_date`) or publication year. New years need no code
+changes. Annual files in `data/processed/` always use accident occurrence year
+and the consistent name `accidents_YYYY.csv`. Records without an accident date
+remain in the central database and are not assigned to a yearly file. The app
+supports manual structured entry, CSV import, retrieval, update, deletion,
+per-year export, and an optional `data/exports/all_years.csv` export. After an
+edit or deletion, it regenerates the affected annual CSVs from SQLite. If a CSV
+write fails, the app reports that the database operation committed and provides
+a resync control to recover the snapshot.
+
+The separate `data/exports/accident_records.csv` export includes all records by
+default; choose verified-only in the app to limit it.
 
 Extraction is a conservative English/Hindi regex and locality-gazetteer
 baseline, not fact verification. Suspected causes remain labeled as suspected,
@@ -48,11 +61,13 @@ Current four-article sample results:
 | Deaths | 2 | 1.00 | 1.00 | 1.00 |
 | Injuries | 3 | 1.00 | 1.00 | 1.00 |
 
-The existing command-line feed collector below remains available as a separate
-legacy workflow and continues using `dehradun_accidents.sqlite3` and its own
-CSV files.
+## Legacy scraper collector
 
-This project discovers English and Hindi news entries from configured sources,
+The existing command-line feed collector remains available as a separate
+2025-only workflow and continues using `dehradun_accidents.sqlite3` and its own
+CSV files. The dynamic manual data manager does not depend on that collector.
+
+This legacy command discovers English and Hindi news entries from configured sources,
 extracts accessible article pages, filters for Dehradun-area road accidents
 published in 2025, and stores raw article text separately from structured
 accident fields.

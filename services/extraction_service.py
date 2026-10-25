@@ -9,9 +9,10 @@ from typing import Any
 
 from database import db
 from nlp.pipeline import extract_accidents
+from . import yearly_data_service
 
 
-def extract_and_save_article(article_id: int, path=None) -> list[dict[str, Any]]:
+def extract_and_save_article(article_id: int, path=None, *, processed_dir=None) -> list[dict[str, Any]]:
     article = db.get_article(article_id, path)
     if not article:
         raise ValueError(f"Article {article_id} was not found.")
@@ -24,8 +25,23 @@ def extract_and_save_article(article_id: int, path=None) -> list[dict[str, Any]]
         published_date=article["published_date"],
         language=article["language"],
     )
-    new_ids = [db.insert_accident_record(article_id, record, path) for record in extracted]
-    return [db.get_accident_record(record_id, path) for record_id in new_ids]
+    batch = [
+        {
+            "article_id": article_id,
+            "record_key": f"article-{article_id}-incident-{index + 1}",
+            "headline": article["headline"],
+            "published_date": article["published_date"],
+            "language": article["language"],
+            "source_name": article["source_name"],
+            "source_url": article["source_url"],
+            **record,
+        }
+        for index, record in enumerate(extracted)
+    ]
+    result = yearly_data_service.add_records(batch, db_path=path, processed_dir=processed_dir)
+    if result["saved"]:
+        return [db.get_accident_record(record_id, path) for record_id in result["inserted_ids"]]
+    return db.list_accident_records(article_id, path=path)
 
 
 def _clean_optional_text(value: Any) -> str | None:
@@ -41,6 +57,7 @@ def save_review(
     *,
     review_status: str,
     path=None,
+    processed_dir=None,
 ) -> None:
     current = db.get_accident_record(accident_id, path)
     if not current:
@@ -77,15 +94,12 @@ def save_review(
     except ValueError:
         event_year = None
     district = normalized["district"]
-    if event_year is not None and event_year != 2025:
-        scope_status = "out_of_scope"
-        scope_reason = f"Incident year is {event_year}; target year is 2025."
-    elif district and district.casefold() != "dehradun":
+    if district and district.casefold() != "dehradun":
         scope_status = "out_of_scope"
         scope_reason = f"District is {district}; target district is Dehradun."
-    elif event_year == 2025 and district and district.casefold() == "dehradun":
+    elif event_year is not None and district and district.casefold() == "dehradun":
         scope_status = "in_scope"
-        scope_reason = "Incident date and Dehradun district match the project scope."
+        scope_reason = f"Incident date ({event_year}) and Dehradun district were checked."
     else:
         scope_status = "unknown"
         scope_reason = "Incident date or district has not been verified."
@@ -115,9 +129,10 @@ def save_review(
         else:
             sources[field] = "automatic"
 
-    db.update_accident_record(
+    yearly_data_service.update_record(
         accident_id,
         normalized,
         field_sources_json=json.dumps(sources, ensure_ascii=False, sort_keys=True),
-        path=path,
+        db_path=path,
+        processed_dir=processed_dir,
     )

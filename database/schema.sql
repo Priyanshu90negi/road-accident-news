@@ -15,8 +15,18 @@ CREATE TABLE IF NOT EXISTS news_articles (
 
 CREATE TABLE IF NOT EXISTS accident_records (
     accident_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    article_id INTEGER NOT NULL REFERENCES news_articles(article_id) ON DELETE RESTRICT,
+    record_key TEXT NOT NULL UNIQUE,
+    article_id INTEGER REFERENCES news_articles(article_id) ON DELETE SET NULL,
+    headline TEXT NOT NULL DEFAULT '',
+    published_date TEXT,
+    language TEXT CHECK (language IS NULL OR language IN ('English', 'Hindi')),
+    source_name TEXT,
+    source_url TEXT,
+    source_url_key TEXT,
     accident_date TEXT,
+    occurrence_year INTEGER CHECK (
+        occurrence_year IS NULL OR (occurrence_year >= 1 AND occurrence_year <= 9999)
+    ),
     accident_time TEXT,
     district TEXT,
     area TEXT,
@@ -47,6 +57,10 @@ CREATE TABLE IF NOT EXISTS accident_records (
 
 CREATE INDEX IF NOT EXISTS idx_records_article_id
     ON accident_records(article_id);
+CREATE INDEX IF NOT EXISTS idx_records_occurrence_year
+    ON accident_records(occurrence_year);
+CREATE INDEX IF NOT EXISTS idx_records_source_url
+    ON accident_records(source_url_key);
 CREATE INDEX IF NOT EXISTS idx_records_review_status
     ON accident_records(review_status);
 CREATE INDEX IF NOT EXISTS idx_records_scope

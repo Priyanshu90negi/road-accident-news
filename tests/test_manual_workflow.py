@@ -20,6 +20,7 @@ class ManualWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Path(self.temp_dir.name) / "accident_news.db"
+        self.processed_dir = Path(self.temp_dir.name) / "processed"
         db.initialize_database(self.database)
 
     def tearDown(self):
@@ -136,13 +137,14 @@ class ManualWorkflowTests(unittest.TestCase):
         self.assertEqual({record["area"] for record in records}, {"Mussoorie", "Doiwala"})
         self.assertEqual({record["accident_date"] for record in records}, {"2025-01-05", "2025-01-08"})
 
-    def test_out_of_scope_incident_is_flagged(self):
-        record = extract_accidents("A crash occurred in Dehradun on 2024-12-31.")[0]
-        self.assertEqual(record["scope_status"], "out_of_scope")
+    def test_historical_incident_year_is_kept_in_scope(self):
+        record = extract_accidents("A crash occurred in Dehradun on 1899-12-31.")[0]
+        self.assertEqual(record["scope_status"], "in_scope")
+        self.assertEqual(record["accident_date"], "1899-12-31")
 
     def test_review_records_manual_provenance_and_verified_filter(self):
         article_id = article_service.save_article(self.article(), self.database)
-        records = extraction_service.extract_and_save_article(article_id, self.database)
+        records = extraction_service.extract_and_save_article(article_id, self.database, processed_dir=self.processed_dir)
         self.assertEqual(len(records), 1)
         accident_id = records[0]["accident_id"]
         extraction_service.save_review(
@@ -154,6 +156,7 @@ class ManualWorkflowTests(unittest.TestCase):
             },
             review_status="verified",
             path=self.database,
+            processed_dir=self.processed_dir,
         )
         saved = db.get_accident_record(accident_id, self.database)
         self.assertEqual(saved["deaths"], 0)
@@ -163,14 +166,14 @@ class ManualWorkflowTests(unittest.TestCase):
 
     def test_source_article_text_is_not_copied_into_accident_rows(self):
         article_id = article_service.save_article(self.article(), self.database)
-        extraction_service.extract_and_save_article(article_id, self.database)
+        extraction_service.extract_and_save_article(article_id, self.database, processed_dir=self.processed_dir)
         with closing(db.connect(self.database)) as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(accident_records)")}
         self.assertNotIn("article_text", columns)
 
     def test_possible_duplicate_incident_is_flagged_across_articles(self):
         first_id = article_service.save_article(self.article(), self.database)
-        first_records = extraction_service.extract_and_save_article(first_id, self.database)
+        first_records = extraction_service.extract_and_save_article(first_id, self.database, processed_dir=self.processed_dir)
         second_id = article_service.save_article(
             self.article(
                 headline="Car crash near Mussoorie", source_name="Another News",
@@ -179,7 +182,7 @@ class ManualWorkflowTests(unittest.TestCase):
             ),
             self.database,
         )
-        second_records = extraction_service.extract_and_save_article(second_id, self.database)
+        second_records = extraction_service.extract_and_save_article(second_id, self.database, processed_dir=self.processed_dir)
         self.assertEqual(len(first_records), 1)
         self.assertEqual(len(second_records), 1)
         self.assertEqual(db.get_accident_record(first_records[0]["accident_id"], self.database)["possible_duplicate"], 1)
@@ -195,7 +198,7 @@ class ManualWorkflowTests(unittest.TestCase):
             ),
             self.database,
         )
-        record = extraction_service.extract_and_save_article(article_id, self.database)[0]
+        record = extraction_service.extract_and_save_article(article_id, self.database, processed_dir=self.processed_dir)[0]
         unverified_path = Path(self.temp_dir.name) / "all.csv"
         export_service.export_csv(unverified_path, db_path=self.database)
         raw = unverified_path.read_bytes()
@@ -215,6 +218,7 @@ class ManualWorkflowTests(unittest.TestCase):
             },
             review_status="verified",
             path=self.database,
+            processed_dir=self.processed_dir,
         )
         verified = export_service.export_csv_bytes(verified_only=True, db_path=self.database)
         self.assertIn(b"verified", verified)

@@ -139,12 +139,10 @@ def _extract_one(segment: str, published_date: str | None) -> dict[str, Any]:
             incident_year = None
     else:
         incident_year = None
-    if incident_year is not None and incident_year != 2025:
-        scope_status, scope_reason = "out_of_scope", f"Incident year is {incident_year}; target year is 2025."
-    elif district and district.casefold() != "dehradun":
+    if district and district.casefold() != "dehradun":
         scope_status, scope_reason = "out_of_scope", f"District is {district}; target district is Dehradun."
-    elif incident_year == 2025 and district and district.casefold() == "dehradun":
-        scope_status, scope_reason = "in_scope", "Incident date and Dehradun district match the project scope."
+    elif incident_year is not None and district and district.casefold() == "dehradun":
+        scope_status, scope_reason = "in_scope", f"Incident date ({incident_year}) and Dehradun district were extracted."
     else:
         scope_status, scope_reason = "unknown", "Incident date or district could not be established from the article."
 
