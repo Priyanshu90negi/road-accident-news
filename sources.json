@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Google News RSS - English",
+    "language": "en",
+    "url": "https://news.google.com/rss/search?q=Dehradun+road+accident+after%3A2024-12-31+before%3A2026-01-01&hl=en-IN&gl=IN&ceid=IN%3Aen"
+  },
+  {
+    "name": "Google News RSS - Hindi",
+    "language": "hi",
+    "url": "https://news.google.com/rss/search?q=%E0%A4%A6%E0%A5%87%E0%A4%B9%E0%A4%B0%E0%A4%BE%E0%A4%A6%E0%A5%82%E0%A4%A8+%E0%A4%B8%E0%A4%A1%E0%A4%BC%E0%A4%95+%E0%A4%B9%E0%A4%BE%E0%A4%A6%E0%A4%B8%E0%A4%BE+after%3A2024-12-31+before%3A2026-01-01&hl=hi&gl=IN&ceid=IN%3Ahi"
+  }
+]

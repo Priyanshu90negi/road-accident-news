@@ -1,0 +1,62 @@
+[
+  {
+    "headline": "One dead, two injured in Mussoorie crash",
+    "language": "English",
+    "article_text": "On 9 June 2025, a speeding car collided near Mussoorie at 10:30 pm. Two people were injured and one person died.",
+    "gold": {
+      "accident_date": "2025-06-09",
+      "district": "Dehradun",
+      "area": "Mussoorie",
+      "accident_type": "collision",
+      "cause": "speeding",
+      "vehicles_involved": "car",
+      "deaths": 1,
+      "injuries": 2
+    }
+  },
+  {
+    "headline": "देहरादून में सड़क हादसा",
+    "language": "Hindi",
+    "article_text": "9 जून 2025 को देहरादून में सड़क हादसा हुआ। दो लोग घायल हुए और एक व्यक्ति की मौत हो गई। रात 10 बजे बस और कार टकराईं।",
+    "gold": {
+      "accident_date": "2025-06-09",
+      "district": "Dehradun",
+      "area": null,
+      "accident_type": "collision",
+      "cause": null,
+      "vehicles_involved": "car, bus",
+      "deaths": 1,
+      "injuries": 2
+    }
+  },
+  {
+    "headline": "No injuries in Doiwala bus rollover",
+    "language": "English",
+    "article_text": "On 2025-01-05 a bus overturned in Doiwala. No one was injured.",
+    "gold": {
+      "accident_date": "2025-01-05",
+      "district": "Dehradun",
+      "area": "Doiwala",
+      "accident_type": "rollover",
+      "cause": null,
+      "vehicles_involved": "bus",
+      "deaths": null,
+      "injuries": 0
+    }
+  },
+  {
+    "headline": "Truck crash near Chakrata",
+    "language": "English",
+    "article_text": "A truck crash happened near Chakrata on 2025-02-03. Two people were injured, but a later update says three were injured.",
+    "gold": {
+      "accident_date": "2025-02-03",
+      "district": "Dehradun",
+      "area": "Chakrata",
+      "accident_type": "road accident",
+      "cause": null,
+      "vehicles_involved": "truck",
+      "deaths": null,
+      "injuries": null
+    }
+  }
+]

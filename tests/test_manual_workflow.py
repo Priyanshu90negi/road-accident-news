@@ -1,0 +1,224 @@
+"""Tests for the manual collection, extraction, review, and export workflow."""
+
+from __future__ import annotations
+
+import csv
+import json
+import tempfile
+import unittest
+from contextlib import closing
+from pathlib import Path
+
+from database import db
+from database.db import DuplicateArticleError
+from nlp.pipeline import extract_accidents
+from nlp.evaluate import evaluate_file
+from services import article_service, export_service, extraction_service
+
+
+class ManualWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database = Path(self.temp_dir.name) / "accident_news.db"
+        db.initialize_database(self.database)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def article(self, **updates):
+        article = {
+            "headline": "Two injured in Dehradun road accident",
+            "article_text": (
+                "On 9 June 2025, a speeding car crashed near Mussoorie at 10:30 pm. "
+                "Two people were injured and one person died."
+            ),
+            "source_name": "Example News",
+            "source_url": "https://example.com/news/story-1",
+            "published_date": "2025-06-10",
+            "language": "English",
+        }
+        article.update(updates)
+        return article
+
+    def test_saves_and_retrieves_long_original_article_unchanged(self):
+        body = ("पूरा समाचार: देहरादून में सड़क हादसा।\n" * 12_000) + "  अंत।\n"
+        article_id = article_service.save_article(self.article(article_text=body), self.database)
+        saved = article_service.get_article(article_id, self.database)
+        self.assertEqual(saved["article_text"], body)
+        self.assertGreater(len(saved["article_text"]), 100_000)
+
+    def test_detects_duplicate_by_normalized_url_and_text(self):
+        article_service.save_article(self.article(), self.database)
+        with self.assertRaises(DuplicateArticleError) as duplicate:
+            article_service.save_article(
+                self.article(source_url="https://EXAMPLE.com/news/story-1/#top", article_text="different body"),
+                self.database,
+            )
+        self.assertEqual(duplicate.exception.existing_article_id, 1)
+        with self.assertRaises(DuplicateArticleError):
+            article_service.save_article(
+                self.article(source_url="https://example.com/another", article_text="  " + self.article()["article_text"].upper() + "  "),
+                self.database,
+            )
+
+    def test_extracts_english_fields_and_keeps_unknown_values_blank(self):
+        article = self.article(article_text=(
+            "On 9 June 2025, a speeding car collided near Mussoorie at 10:30 pm. "
+            "Two people were injured and one person died."
+        ))
+        original = article["article_text"]
+        records = extract_accidents(original, headline=article["headline"], published_date="2025-06-10")
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["accident_date"], "2025-06-09")
+        self.assertEqual(record["accident_time"], "22:30")
+        self.assertEqual(record["district"], "Dehradun")
+        self.assertEqual(record["area"], "Mussoorie")
+        self.assertEqual(record["cause"], "speeding")
+        self.assertEqual(record["deaths"], 1)
+        self.assertEqual(record["injuries"], 2)
+        self.assertEqual(article["article_text"], original)
+
+    def test_hindi_dates_times_numbers_and_unicode(self):
+        text = "9 जून 2025 को देहरादून में सड़क हादसा हुआ। दो लोग घायल हुए और एक व्यक्ति की मौत हो गई। रात 10 बजे बस और कार टकराईं।"
+        record = extract_accidents(text, language="Hindi")[0]
+        self.assertEqual(record["accident_date"], "2025-06-09")
+        self.assertEqual(record["accident_time"], "22:00")
+        self.assertEqual(record["district"], "Dehradun")
+        self.assertEqual(record["deaths"], 1)
+        self.assertEqual(record["injuries"], 2)
+        self.assertIn("बस", text)
+
+    def test_publication_date_is_not_used_as_incident_date(self):
+        records = extract_accidents(
+            "A car crash was reported in Dehradun. Two people were injured.",
+            published_date="2025-06-10",
+        )
+        self.assertEqual(records[0]["accident_date"], None)
+        self.assertEqual(records[0]["scope_status"], "unknown")
+
+    def test_unknown_is_not_zero_but_explicit_zero_is_preserved(self):
+        unknown = extract_accidents("A crash occurred in Dehradun in 2025.")[0]
+        explicit = extract_accidents("A crash occurred in Dehradun in 2025. No one was injured.")[0]
+        self.assertIsNone(unknown["deaths"])
+        self.assertIsNone(unknown["injuries"])
+        self.assertEqual(explicit["injuries"], 0)
+
+    def test_conflicting_counts_are_left_unknown_and_flagged(self):
+        record = extract_accidents(
+            "A Dehradun crash occurred on 2025-02-03. Two people were injured, later reports said three were injured."
+        )[0]
+        self.assertIsNone(record["injuries"])
+        self.assertEqual(record["review_status"], "needs_review")
+        self.assertIn("Conflicting injury counts", json.loads(record["conflict_notes_json"])[0])
+
+    def test_negated_cause_and_casualty_claims_are_not_extracted(self):
+        record = extract_accidents(
+            "A crash occurred in Dehradun on 2025-03-03. "
+            "Police said speeding was not the cause, and two people were not injured."
+        )[0]
+        self.assertIsNone(record["cause"])
+        self.assertIsNone(record["injuries"])
+
+    def test_manual_annotation_evaluation_reports_exact_match_metrics(self):
+        result = evaluate_file()
+        self.assertEqual(result["sample_count"], 4)
+        self.assertEqual(result["fields"]["accident_date"]["f1"], 1.0)
+        self.assertEqual(result["fields"]["accident_type"]["f1"], 1.0)
+
+    def test_multiple_incidents_in_one_article_create_separate_records(self):
+        text = (
+            "On 2025-01-05, a car crash occurred near Mussoorie. One person was injured.\n\n"
+            "Another accident occurred on 2025-01-08 in Doiwala when a bus overturned. Two people died."
+        )
+        records = extract_accidents(text)
+        self.assertEqual(len(records), 2)
+        self.assertEqual({record["area"] for record in records}, {"Mussoorie", "Doiwala"})
+        self.assertEqual({record["accident_date"] for record in records}, {"2025-01-05", "2025-01-08"})
+
+    def test_out_of_scope_incident_is_flagged(self):
+        record = extract_accidents("A crash occurred in Dehradun on 2024-12-31.")[0]
+        self.assertEqual(record["scope_status"], "out_of_scope")
+
+    def test_review_records_manual_provenance_and_verified_filter(self):
+        article_id = article_service.save_article(self.article(), self.database)
+        records = extraction_service.extract_and_save_article(article_id, self.database)
+        self.assertEqual(len(records), 1)
+        accident_id = records[0]["accident_id"]
+        extraction_service.save_review(
+            accident_id,
+            {
+                "accident_date": "2025-06-09", "accident_time": "22:30", "district": "Dehradun",
+                "area": "Mussoorie", "accident_type": "collision", "cause": "speeding",
+                "vehicles_involved": "car", "deaths": "0", "injuries": "2", "weather": "",
+            },
+            review_status="verified",
+            path=self.database,
+        )
+        saved = db.get_accident_record(accident_id, self.database)
+        self.assertEqual(saved["deaths"], 0)
+        self.assertEqual(saved["review_status"], "verified")
+        self.assertEqual(json.loads(saved["field_sources_json"])["deaths"], "manual")
+        self.assertEqual(len(db.list_accident_records(verified_only=True, path=self.database)), 1)
+
+    def test_source_article_text_is_not_copied_into_accident_rows(self):
+        article_id = article_service.save_article(self.article(), self.database)
+        extraction_service.extract_and_save_article(article_id, self.database)
+        with closing(db.connect(self.database)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(accident_records)")}
+        self.assertNotIn("article_text", columns)
+
+    def test_possible_duplicate_incident_is_flagged_across_articles(self):
+        first_id = article_service.save_article(self.article(), self.database)
+        first_records = extraction_service.extract_and_save_article(first_id, self.database)
+        second_id = article_service.save_article(
+            self.article(
+                headline="Car crash near Mussoorie", source_name="Another News",
+                source_url="https://another.example/story",
+                article_text=self.article()["article_text"] + " This outlet also interviewed a witness.",
+            ),
+            self.database,
+        )
+        second_records = extraction_service.extract_and_save_article(second_id, self.database)
+        self.assertEqual(len(first_records), 1)
+        self.assertEqual(len(second_records), 1)
+        self.assertEqual(db.get_accident_record(first_records[0]["accident_id"], self.database)["possible_duplicate"], 1)
+        self.assertEqual(second_records[0]["possible_duplicate"], 1)
+
+    def test_csv_has_excel_bom_unicode_and_verified_filter(self):
+        article_id = article_service.save_article(
+            self.article(
+                headline="देहरादून सड़क हादसा",
+                article_text="9 जून 2025 को देहरादून में सड़क हादसा हुआ। दो लोग घायल हुए।",
+                source_name="स्थानीय समाचार",
+                language="Hindi",
+            ),
+            self.database,
+        )
+        record = extraction_service.extract_and_save_article(article_id, self.database)[0]
+        unverified_path = Path(self.temp_dir.name) / "all.csv"
+        export_service.export_csv(unverified_path, db_path=self.database)
+        raw = unverified_path.read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertIn("स्थानीय समाचार".encode("utf-8"), raw)
+        with unverified_path.open(encoding="utf-8-sig", newline="") as csv_file:
+            rows = list(csv.DictReader(csv_file))
+        self.assertEqual(rows[0]["injuries"], "2")
+        self.assertEqual(rows[0]["deaths"], "")
+        self.assertEqual(rows[0]["review_status"], "pending")
+        extraction_service.save_review(
+            record["accident_id"],
+            {
+                "accident_date": "2025-06-09", "district": "Dehradun", "area": "Dehradun",
+                "accident_type": "road accident", "cause": "", "vehicles_involved": "",
+                "deaths": "", "injuries": "2", "weather": "",
+            },
+            review_status="verified",
+            path=self.database,
+        )
+        verified = export_service.export_csv_bytes(verified_only=True, db_path=self.database)
+        self.assertIn(b"verified", verified)
+
+
+if __name__ == "__main__":
+    unittest.main()
