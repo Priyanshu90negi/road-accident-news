@@ -110,7 +110,9 @@ def _optional_count(value: Any, field_name: str) -> int | None:
     return parsed
 
 
-def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
+def normalize_record(
+    record: dict[str, Any], *, require_headline: bool = True
+) -> dict[str, Any]:
     """Validate and normalize import/form data; occurrence year is always derived."""
     normalized = dict(record)
     aliases = {"accident_cause": "cause", "casualties": "injuries", "article_url": "source_url", "source": "source_name"}
@@ -119,9 +121,11 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
             normalized[canonical] = normalized[alias]
 
     headline = _optional_text(normalized.get("headline"))
-    if not headline:
+    if require_headline and not headline:
         raise ValueError("Headline is required.")
-    result: dict[str, Any] = {"headline": headline}
+    # Screenshot drafts may have no legible headline. Keep that value blank
+    # instead of asking the extractor or reviewer to invent one.
+    result: dict[str, Any] = {"headline": headline or ""}
     for field in ("published_date", "accident_date"):
         result[field] = _optional_date(normalized.get(field), field.replace("_", " ").capitalize())
     supplied_year = _optional_text(normalized.get("occurrence_year", normalized.get("year")))
@@ -187,6 +191,7 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     result["possible_duplicate"] = int(normalized.get("possible_duplicate") or 0)
     result["extracted_fields_json"] = normalized.get("extracted_fields_json") or "{}"
     result["field_sources_json"] = normalized.get("field_sources_json") or "{}"
+    result["evidence_json"] = normalized.get("evidence_json") or "{}"
     result["conflict_notes_json"] = normalized.get("conflict_notes_json") or "[]"
     article_id = _optional_text(normalized.get("article_id"))
     if article_id is not None:
@@ -247,6 +252,7 @@ def add_records(
     *,
     selected_year: Any = None,
     year_basis: str = "accident",
+    allow_unknown_headline: bool = False,
     db_path=None,
     processed_dir=None,
 ) -> dict[str, Any]:
@@ -256,7 +262,7 @@ def add_records(
     unassigned = 0
     for index, raw in enumerate(records, start=1):
         try:
-            normalized = normalize_record(raw)
+            normalized = normalize_record(raw, require_headline=not allow_unknown_headline)
             if normalized["article_id"] and not db.get_article(normalized["article_id"], db_path):
                 raise ValueError(f"Article ID {normalized['article_id']} does not exist in the central database.")
             _validate_selected_year(normalized, selected_year, year_basis)
@@ -299,11 +305,13 @@ def add_record(
     *,
     selected_year: Any = None,
     year_basis: str = "accident",
+    allow_unknown_headline: bool = False,
     db_path=None,
     processed_dir=None,
 ) -> dict[str, Any]:
     return add_records(
         [record], selected_year=selected_year, year_basis=year_basis,
+        allow_unknown_headline=allow_unknown_headline,
         db_path=db_path, processed_dir=processed_dir,
     )
 
@@ -330,7 +338,7 @@ def update_record(
         raise ValueError(f"Accident record {accident_id} was not found.")
     merged = {field: current.get(field) for field in EDITABLE_RECORD_FIELDS}
     merged.update({key: value for key, value in updates.items() if key in EDITABLE_RECORD_FIELDS})
-    normalized = normalize_record(merged)
+    normalized = normalize_record(merged, require_headline=bool(merged.get("headline")))
     values = {field: normalized.get(field) for field in EDITABLE_RECORD_FIELDS}
     values.update({
         "scope_status": normalized["scope_status"],

@@ -11,6 +11,47 @@ blank (SQLite `NULL`); an explicitly reported zero remains `0`. Possible
 cross-outlet incident duplicates and records outside the Dehradun district are
 flagged for review.
 
+## Screenshot-based collection
+
+The **Upload News Screenshot** page accepts JPG, JPEG, and PNG files. Upload
+multiple pages in one submission when they belong to the same article. The app
+keeps each original image under `data/screenshots/<article-id>/`, records its
+SHA-256 hash, and detects exact duplicate image uploads. To store screenshots in
+another folder, set `ACCIDENT_SCREENSHOT_DIR` before starting Streamlit.
+
+OCR runs locally through Tesseract with the `eng` and `hin` language packs. It
+uses EXIF orientation, grayscale, contrast adjustment, optional orientation
+detection, and upscaling. Each page stores raw OCR text, confidence, and a
+readability flag in SQLite. The combined OCR text is shown separately from the
+editable corrected article text. Unreadable or uncertain pages remain available
+for manual transcription and review.
+
+Install Tesseract OCR 5 with both English (`eng`) and Hindi (`hin`) traineddata.
+If the executable is not on `PATH`, set its location in PowerShell before
+launching the app:
+
+```powershell
+$env:TESSERACT_CMD = "C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
+Then start the app using the setup command above. In **Upload News Screenshot**:
+
+1. Upload one or more screenshots and enter any known article metadata.
+2. Check the original image and raw OCR; correct the separate article text.
+3. Save the article draft, then extract accident details from the saved text.
+4. Review the fields and supporting text evidence. Save as draft, reject, or
+   approve each incident. Only approval writes the record to the central
+   accident table with `review_status=verified`.
+5. The accident year is derived only from the accident date. Unknown dates stay
+   unassigned. Approved incidents with a known year use the existing yearly CSV
+   synchronization service; download a specific year from **Yearly data**.
+
+Screenshot data uses the same `accident_news.db`. The migration adds screenshot
+article, page, and draft-record tables; allows unknown article metadata to stay
+NULL; and adds `evidence_json` to accident records. Existing article and
+accident IDs and rows are preserved. Screenshot drafts do not enter the central
+verified records until a reviewer approves an incident.
+
 Start the manual app from the project directory:
 
 ```powershell
@@ -36,6 +77,19 @@ a resync control to recover the snapshot.
 
 The separate `data/exports/accident_records.csv` export includes all records by
 default; choose verified-only in the app to limit it.
+
+## Model compatibility
+
+The repository contains no trained model or model-specific preprocessing
+pipeline. The actual NLP implementation is the rule-based English/Hindi
+extractor in `nlp/pipeline.py`; the screenshot workflow reuses that extractor
+and the existing accident-record schema without retraining or replacing a
+model. It preserves article text in `news_articles`, keeps structured fields
+in `accident_records`, derives `occurrence_year` from `accident_date`, and
+stores supporting snippets in `evidence_json`. The **CSV export** page can
+export verified records only. There is no training job configured in this
+repository to consume that dataset, so a future model integration will need to
+compare its expected features with these record columns first.
 
 Extraction is a conservative English/Hindi regex and locality-gazetteer
 baseline, not fact verification. Suspected causes remain labeled as suspected,

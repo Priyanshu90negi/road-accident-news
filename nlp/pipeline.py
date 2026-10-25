@@ -158,6 +158,11 @@ def _extract_one(segment: str, published_date: str | None) -> dict[str, Any]:
         "injuries": injuries,
         "weather": weather,
     }
+    evidence = {
+        field: {"value": value, "snippet": segment, "method": "rule-based-nlp"}
+        for field, value in values.items()
+        if value is not None
+    }
     confidence_parts = [
         accident_date is not None, accident_time is not None, district is not None,
         area is not None, accident_type is not None, cause is not None,
@@ -177,6 +182,7 @@ def _extract_one(segment: str, published_date: str | None) -> dict[str, Any]:
         "possible_duplicate": 0,
         "extracted_fields_json": json.dumps(values, ensure_ascii=False, sort_keys=True),
         "field_sources_json": json.dumps(sources, ensure_ascii=False, sort_keys=True),
+        "evidence_json": json.dumps(evidence, ensure_ascii=False, sort_keys=True),
         "conflict_notes_json": json.dumps(conflicts, ensure_ascii=False),
     }
 

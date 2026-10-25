@@ -9,7 +9,7 @@ import streamlit as st
 
 from database import db
 from database.db import DuplicateArticleError
-from services import article_service, export_service, extraction_service, yearly_data_service
+from services import article_service, export_service, extraction_service, screenshot_service, yearly_data_service
 from services.yearly_data_service import YearlyCsvSyncError
 
 
@@ -18,7 +18,9 @@ db.initialize_database()
 
 
 def _article_label(article: dict) -> str:
-    return f"#{article['article_id']} · {article['published_date']} · {article['headline']}"
+    published = article.get("published_date") or "publication date unknown"
+    headline = article.get("headline") or "headline unknown"
+    return f"#{article['article_id']} · {published} · {headline}"
 
 
 def _sync_failure_text(error: YearlyCsvSyncError) -> str:
@@ -61,8 +63,15 @@ def _render_review(article_id: int) -> None:
     left, right = st.columns([0.9, 1.1], gap="large")
     with left:
         st.subheader("Original article")
-        st.caption(f"{article['source_name']} · {article['published_date']} · {article['language']}")
-        st.link_button("Open source article", article["source_url"])
+        st.caption(
+            f"{article.get('source_name') or 'source unknown'} · "
+            f"{article.get('published_date') or 'publication date unknown'} · "
+            f"{article.get('language') or 'language unknown'}"
+        )
+        if article.get("source_url"):
+            st.link_button("Open source article", article["source_url"])
+        else:
+            st.caption("Source URL was not present in the screenshot metadata.")
         st.text_area(
             "Complete original article text",
             value=article["article_text"],
@@ -137,7 +146,10 @@ def _render_review(article_id: int) -> None:
 
 st.title("Dehradun Road Accident News")
 st.caption("Collect English or Hindi reports for any year, review extracted facts, and maintain synchronized exports.")
-page = st.sidebar.radio("Workflow", ["Collect article", "Articles", "Review records", "Yearly data", "CSV export"])
+page = st.sidebar.radio(
+    "Workflow",
+    ["Collect article", "Upload News Screenshot", "Articles", "Review records", "Yearly data", "CSV export"],
+)
 
 if page == "Collect article":
     st.header("Add a news article")
@@ -180,6 +192,297 @@ if page == "Collect article":
         st.divider()
         _render_review(article_id)
 
+elif page == "Upload News Screenshot":
+    st.header("Upload News Screenshot")
+    st.caption(
+        "Upload one or more screenshots from the same article. Originals and page-level OCR are retained; "
+        "only an approved incident is added to the verified dataset."
+    )
+    uploads = st.file_uploader(
+        "Article screenshot(s)",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        help="Choose several pages from one article together. Each original image is preserved for audit.",
+        key="screenshot-upload-files",
+    )
+    with st.form("screenshot-upload-form"):
+        meta_left, meta_right = st.columns(2)
+        with meta_left:
+            screenshot_headline = st.text_input("Headline (leave blank if unknown)")
+            screenshot_source = st.text_input("Source name (leave blank if unknown)")
+            screenshot_url = st.text_input("Source URL (optional)")
+        with meta_right:
+            screenshot_published = st.text_input("Publication date (YYYY-MM-DD; blank if unknown)")
+            screenshot_language = st.selectbox("Article language", ["Unknown", "English", "Hindi"])
+        create_screenshot = st.form_submit_button("Create draft and run OCR")
+    if create_screenshot:
+        try:
+            screenshot_id = screenshot_service.create_draft(
+                [(upload.name, upload.getvalue()) for upload in (uploads or [])],
+                {
+                    "headline": screenshot_headline,
+                    "source_name": screenshot_source,
+                    "source_url": screenshot_url,
+                    "published_date": screenshot_published,
+                    "language": None if screenshot_language == "Unknown" else screenshot_language,
+                },
+            )
+            st.session_state["active_screenshot_article_id"] = screenshot_id
+            st.success(f"Draft {screenshot_id} created. Check the OCR and correct the article text below.")
+            st.rerun()
+        except screenshot_service.DuplicateScreenshotError as error:
+            st.error(f"{error} Open that existing screenshot article to review it.")
+        except (ValueError, OSError) as error:
+            st.error(str(error))
+        except Exception as error:
+            st.error(f"Screenshot draft creation failed: {error}")
+
+    screenshot_drafts = screenshot_service.list_drafts()
+    if not screenshot_drafts:
+        st.info("No screenshot drafts have been created yet.")
+    else:
+        draft_ids = [item["screenshot_article_id"] for item in screenshot_drafts]
+        labels = {
+            item["screenshot_article_id"]: (
+                f"{item.get('headline') or 'Untitled article'} · {item['page_count']} page(s) · "
+                f"{item['status']} · {item['screenshot_article_id'][:8]}"
+            )
+            for item in screenshot_drafts
+        }
+        active_id = st.session_state.get("active_screenshot_article_id")
+        selected_index = draft_ids.index(active_id) if active_id in draft_ids else 0
+        selected_screenshot_id = st.selectbox(
+            "Open a screenshot article draft",
+            draft_ids,
+            index=selected_index,
+            format_func=lambda value: labels[value],
+        )
+        screenshot_draft = screenshot_service.get_draft(selected_screenshot_id)
+        if screenshot_draft:
+            st.caption(
+                f"Article ID: {screenshot_draft['screenshot_article_id']} · "
+                f"Status: {screenshot_draft['status']} · "
+                f"Created: {screenshot_draft['created_at']}"
+            )
+            pages = screenshot_draft["pages"]
+            if pages:
+                page_labels = [f"Page {page['page_order']}: {page['original_filename']}" for page in pages]
+                page_choice = st.selectbox(
+                    "Screenshot to inspect", list(range(len(pages))),
+                    format_func=lambda index: page_labels[index],
+                    key=f"screenshot-page-{selected_screenshot_id}",
+                )
+                selected_page = pages[page_choice]
+            else:
+                selected_page = None
+
+            article_left, article_right = st.columns([0.9, 1.1], gap="large")
+            with article_left:
+                st.subheader("Original screenshot")
+                if selected_page:
+                    image_path = Path(selected_page["image_path"])
+                    if image_path.is_file():
+                        st.image(str(image_path), width="stretch")
+                    else:
+                        st.warning(f"Original image file is missing: {image_path}")
+                    status = selected_page["readability_status"]
+                    if status == "unreadable":
+                        st.error("OCR could not read this image. Transcribe it manually in the article text field.")
+                    elif status == "uncertain":
+                        st.warning("OCR is uncertain on this page. Check names, dates, locations, and counts against the image.")
+                    else:
+                        st.success(f"OCR confidence: {selected_page['ocr_confidence'] or 'unknown'}%")
+                    if selected_page.get("ocr_error"):
+                        st.caption(f"OCR note: {selected_page['ocr_error']}")
+                    with st.expander("Raw OCR output for this page"):
+                        st.text_area(
+                            "Raw OCR output (preserved)", value=selected_page["raw_ocr_text"],
+                            height=240, disabled=True,
+                            key=f"screenshot-raw-page-{selected_page['screenshot_page_id']}",
+                        )
+                else:
+                    st.info("No screenshot page is attached.")
+
+            with article_right:
+                st.subheader("Review article text")
+                metadata_locked = screenshot_draft.get("central_article_id") is not None
+                if metadata_locked:
+                    st.info("Article metadata and text are locked because at least one incident has been approved.")
+                with st.form(f"screenshot-edit-{selected_screenshot_id}"):
+                    edited_headline = st.text_input(
+                        "Headline (blank if unknown)", value=screenshot_draft.get("headline") or "",
+                        disabled=metadata_locked,
+                    )
+                    edited_source = st.text_input(
+                        "Source name", value=screenshot_draft.get("source_name") or "",
+                        disabled=metadata_locked,
+                    )
+                    edited_url = st.text_input(
+                        "Source URL", value=screenshot_draft.get("source_url") or "",
+                        disabled=metadata_locked,
+                    )
+                    edited_published = st.text_input(
+                        "Publication date (YYYY-MM-DD; blank if unknown)",
+                        value=screenshot_draft.get("published_date") or "",
+                        disabled=metadata_locked,
+                    )
+                    language_values = ["Unknown", "English", "Hindi"]
+                    current_language = screenshot_draft.get("language") or "Unknown"
+                    edited_language = st.selectbox(
+                        "Article language", language_values,
+                        index=language_values.index(current_language) if current_language in language_values else 0,
+                        disabled=metadata_locked,
+                    )
+                    st.text_area(
+                        "Raw OCR for all pages (audit copy)",
+                        value=screenshot_draft["raw_ocr_text"], height=150, disabled=True,
+                        key=f"screenshot-raw-all-{selected_screenshot_id}",
+                    )
+                    edited_article_text = st.text_area(
+                        "Corrected article text", value=screenshot_draft["reviewed_article_text"],
+                        height=320, disabled=metadata_locked,
+                        help="This editable text is separate from the preserved raw OCR output.",
+                    )
+                    save_text = st.form_submit_button("Save text and metadata", disabled=metadata_locked)
+                if save_text:
+                    try:
+                        screenshot_service.save_draft(
+                            selected_screenshot_id,
+                            {
+                                "headline": edited_headline,
+                                "source_name": edited_source,
+                                "source_url": edited_url,
+                                "published_date": edited_published,
+                                "language": None if edited_language == "Unknown" else edited_language,
+                                "reviewed_article_text": edited_article_text,
+                            },
+                        )
+                        st.success("Corrected article text and metadata saved as a draft.")
+                        st.rerun()
+                    except (ValueError, OSError) as error:
+                        st.error(str(error))
+
+            if not metadata_locked:
+                if st.button("Extract accident details from saved text", key=f"extract-screenshot-{selected_screenshot_id}"):
+                    try:
+                        records = screenshot_service.extract_draft_records(selected_screenshot_id)
+                        if records:
+                            st.success(f"{len(records)} incident draft(s) ready for review.")
+                        else:
+                            st.warning("No road-accident details were extracted. The article remains saved as a draft.")
+                        st.rerun()
+                    except (ValueError, OSError) as error:
+                        st.error(str(error))
+                    except Exception as error:
+                        st.error(f"Extraction failed: {error}")
+
+            if screenshot_draft["records"]:
+                st.subheader("Extracted incident drafts")
+                st.caption("Publication date and accident date are separate. Unknown accident dates stay unassigned to a year.")
+                for screenshot_record in screenshot_draft["records"]:
+                    record_id = screenshot_record["screenshot_record_id"]
+                    record = screenshot_record["record"]
+                    status = screenshot_record["status"]
+                    with st.expander(
+                        f"Incident {screenshot_record['record_number']} · {status} · "
+                        f"{record.get('headline') or 'headline unknown'}",
+                        expanded=status != "approved",
+                    ):
+                        if screenshot_record["conflicts"]:
+                            st.warning("Review conflicts: " + " ".join(screenshot_record["conflicts"]))
+                        if screenshot_record["evidence"]:
+                            with st.expander("Supporting text evidence"):
+                                st.json(screenshot_record["evidence"])
+                        if status == "approved":
+                            if screenshot_record.get("central_accident_id") is not None:
+                                st.success(
+                                    f"Verified record #{screenshot_record['central_accident_id']} is in the central database."
+                                )
+                            else:
+                                st.warning("This incident was approved earlier, then removed from the central dataset. Screenshot audit data is retained.")
+                            continue
+                        record_image, record_fields = st.columns([0.8, 1.2], gap="large")
+                        with record_image:
+                            if selected_page and Path(selected_page["image_path"]).is_file():
+                                st.image(str(selected_page["image_path"]), width="stretch")
+                        with record_fields:
+                            with st.form(f"screenshot-record-{record_id}"):
+                                field_left, field_right = st.columns(2)
+                                with field_left:
+                                    record_headline = st.text_input("Headline", value=record.get("headline") or "", key=f"sr-headline-{record_id}")
+                                    record_published = st.text_input("Publication date (YYYY-MM-DD)", value=record.get("published_date") or "", key=f"sr-published-{record_id}")
+                                    record_date = st.text_input("Accident date (YYYY-MM-DD; blank if unknown)", value=record.get("accident_date") or "", key=f"sr-date-{record_id}")
+                                    record_time = st.text_input("Accident time (HH:MM; blank if unknown)", value=record.get("accident_time") or "", key=f"sr-time-{record_id}")
+                                    record_district = st.text_input("District", value=record.get("district") or "", key=f"sr-district-{record_id}")
+                                    record_area = st.text_input("Locality / exact area", value=record.get("area") or "", key=f"sr-area-{record_id}")
+                                    record_type = st.text_input("Accident type", value=record.get("accident_type") or "", key=f"sr-type-{record_id}")
+                                with field_right:
+                                    record_source = st.text_input("Source name", value=record.get("source_name") or "", key=f"sr-source-{record_id}")
+                                    record_url = st.text_input("Source URL", value=record.get("source_url") or "", key=f"sr-url-{record_id}")
+                                    record_cause = st.text_input("Cause", value=record.get("cause") or "", key=f"sr-cause-{record_id}")
+                                    record_weather = st.text_input("Weather / road conditions", value=record.get("weather") or "", key=f"sr-weather-{record_id}")
+                                    record_vehicles = st.text_input("Vehicles involved", value=record.get("vehicles_involved") or "", key=f"sr-vehicles-{record_id}")
+                                    record_deaths = st.text_input("Deaths (blank if unknown)", value="" if record.get("deaths") is None else str(record["deaths"]), key=f"sr-deaths-{record_id}")
+                                    record_injuries = st.text_input("Injuries (blank if unknown)", value="" if record.get("injuries") is None else str(record["injuries"]), key=f"sr-injuries-{record_id}")
+                                    record_language_value = record.get("language") or "Unknown"
+                                    record_language = st.selectbox(
+                                        "Language", ["Unknown", "English", "Hindi"],
+                                        index=["Unknown", "English", "Hindi"].index(record_language_value)
+                                        if record_language_value in {"Unknown", "English", "Hindi"} else 0,
+                                        key=f"sr-language-{record_id}",
+                                    )
+                                save_record_draft = st.form_submit_button("Save as draft")
+                                approve_record = st.form_submit_button("Approve and add to verified dataset")
+                                reject_record = st.form_submit_button("Reject this incident")
+                            record_updates = {
+                                "headline": record_headline,
+                                "published_date": record_published,
+                                "accident_date": record_date,
+                                "accident_time": record_time,
+                                "district": record_district,
+                                "area": record_area,
+                                "accident_type": record_type,
+                                "source_name": record_source,
+                                "source_url": record_url,
+                                "cause": record_cause,
+                                "weather": record_weather,
+                                "vehicles_involved": record_vehicles,
+                                "deaths": record_deaths,
+                                "injuries": record_injuries,
+                                "language": None if record_language == "Unknown" else record_language,
+                            }
+                            try:
+                                if save_record_draft:
+                                    screenshot_service.save_draft_record(record_id, record_updates)
+                                    st.success("Incident draft saved.")
+                                    st.rerun()
+                                elif approve_record:
+                                    screenshot_service.save_draft_record(record_id, record_updates)
+                                    approval = screenshot_service.approve_draft_record(record_id)
+                                    st.success(f"Verified record #{approval['accident_id']} approved and saved.")
+                                    if approval.get("unassigned_year"):
+                                        st.info("Accident date is unknown, so this record remains unassigned to a year.")
+                                    st.rerun()
+                                elif reject_record:
+                                    screenshot_service.save_draft_record(record_id, record_updates, status="rejected")
+                                    st.warning("Incident rejected; no verified accident record was created.")
+                                    st.rerun()
+                            except YearlyCsvSyncError as error:
+                                st.error(_sync_failure_text(error))
+                            except (ValueError, OSError) as error:
+                                st.error(str(error))
+                            except Exception as error:
+                                st.error(f"Incident review failed: {error}")
+
+            if screenshot_draft.get("central_article_id") is None and screenshot_draft["status"] != "rejected":
+                if st.button("Reject entire article draft", key=f"reject-screenshot-{selected_screenshot_id}"):
+                    try:
+                        screenshot_service.reject_draft_article(selected_screenshot_id)
+                        st.success("Article draft rejected and retained for audit.")
+                        st.rerun()
+                    except ValueError as error:
+                        st.error(str(error))
+
 elif page == "Articles":
     st.header("Collected articles")
     articles = article_service.list_articles()
@@ -195,8 +498,15 @@ elif page == "Articles":
         )
         article = article_service.get_article(selected_id)
         st.subheader(article["headline"])
-        st.caption(f"{article['source_name']} · {article['published_date']} · {article['language']}")
-        st.link_button("Open source article", article["source_url"])
+        st.caption(
+            f"{article.get('source_name') or 'source unknown'} · "
+            f"{article.get('published_date') or 'publication date unknown'} · "
+            f"{article.get('language') or 'language unknown'}"
+        )
+        if article.get("source_url"):
+            st.link_button("Open source article", article["source_url"])
+        else:
+            st.caption("No source URL was recorded for this screenshot article.")
         st.text_area("Complete original article text", value=article["article_text"], height=520, disabled=True)
 
 elif page == "Review records":
