@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import tempfile
 import unittest
 from contextlib import closing
@@ -142,10 +143,11 @@ class ManualWorkflowTests(unittest.TestCase):
         ), self.database)
 
         diagnostics: list[str] = []
-        with patch("services.extraction_service.extract_accidents", wraps=extract_accidents) as extractor:
-            records = extraction_service.extract_and_save_article(
-                article_id, self.database, processed_dir=self.processed_dir, diagnostics=diagnostics
-            )
+        with patch.dict(os.environ, {"ACCIDENT_NEWS_DB": str(self.database)}):
+            with patch("services.extraction_service.extract_accidents", wraps=extract_accidents) as extractor:
+                records = extraction_service.extract_and_save_article(
+                    article_id, diagnostics=diagnostics
+                )
 
         self.assertEqual(len(records), 1)
         record = records[0]
@@ -181,9 +183,10 @@ class ManualWorkflowTests(unittest.TestCase):
         ), self.database)
 
         diagnostics: list[str] = []
-        records = extraction_service.extract_and_save_article(
-            article_id, self.database, processed_dir=self.processed_dir, diagnostics=diagnostics
-        )
+        with patch.dict(os.environ, {"ACCIDENT_NEWS_DB": str(self.database)}):
+            records = extraction_service.extract_and_save_article(
+                article_id, diagnostics=diagnostics
+            )
 
         self.assertEqual(len(records), 1)
         record = records[0]
