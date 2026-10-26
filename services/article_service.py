@@ -13,7 +13,15 @@ def validate_article(article: dict[str, Any]) -> dict[str, Any]:
     required = ("headline", "article_text", "source_name", "source_url", "published_date", "language")
     missing = [name for name in required if article.get(name) is None or article.get(name) == ""]
     if missing:
-        raise ValueError("Complete all required fields: " + ", ".join(missing) + ".")
+        labels = {
+            "headline": "News headline",
+            "article_text": "Full article text",
+            "source_name": "Source name",
+            "source_url": "Original article URL",
+            "published_date": "Publication date",
+            "language": "Language",
+        }
+        raise ValueError("Complete all required fields: " + ", ".join(labels[name] for name in missing) + ".")
     cleaned = dict(article)
     if not isinstance(article["article_text"], str) or not article["article_text"].strip():
         raise ValueError("Full article text is required.")
@@ -22,7 +30,12 @@ def validate_article(article: dict[str, Any]) -> dict[str, Any]:
     for name in ("headline", "source_name", "source_url"):
         cleaned[name] = str(article[name]).strip()
         if not cleaned[name]:
-            raise ValueError(f"{name.replace('_', ' ').capitalize()} is required.")
+            label = {
+                "headline": "News headline",
+                "source_name": "Source name",
+                "source_url": "Original article URL",
+            }[name]
+            raise ValueError(f"{label} is required.")
     parts = urlsplit(cleaned["source_url"])
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         raise ValueError("Original article URL must be a valid HTTP or HTTPS URL.")

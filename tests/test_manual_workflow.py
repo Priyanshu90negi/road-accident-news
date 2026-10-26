@@ -15,7 +15,7 @@ from database import db
 from database.db import DuplicateArticleError
 from nlp.pipeline import extract_accidents
 from nlp.evaluate import evaluate_file
-from services import article_service, export_service, extraction_service
+from services import article_service, export_service, extraction_service, screenshot_service
 from services.extraction_compat import invoke_article_extractor
 
 
@@ -50,6 +50,38 @@ class ManualWorkflowTests(unittest.TestCase):
         saved = article_service.get_article(article_id, self.database)
         self.assertEqual(saved["article_text"], body)
         self.assertGreater(len(saved["article_text"]), 100_000)
+
+    def test_manual_article_validation_reports_required_fields(self):
+        with self.assertRaisesRegex(ValueError, "Complete all required fields: News headline, Full article text"):
+            article_service.save_article({}, self.database)
+        with self.assertRaisesRegex(ValueError, "Full article text is required"):
+            article_service.save_article(self.article(article_text="   "), self.database)
+
+    def test_manual_article_collection_never_invokes_tesseract(self):
+        with (
+            patch.dict(os.environ, {"ENABLE_SCREENSHOT_OCR": "false"}),
+            patch("services.screenshot_service._tesseract_binary", side_effect=AssertionError("Tesseract should not be checked")),
+            patch("services.screenshot_service.ocr_image", side_effect=AssertionError("OCR should not run")),
+        ):
+            article_id = article_service.save_article(self.article(), self.database)
+            records = extraction_service.extract_and_save_article(
+                article_id, self.database, processed_dir=self.processed_dir,
+            )
+
+        self.assertTrue(records)
+        self.assertEqual(db.get_article(article_id, self.database)["article_text"], self.article()["article_text"])
+
+    def test_reprocessing_saved_article_does_not_duplicate_accident_records(self):
+        article_id = article_service.save_article(self.article(), self.database)
+        first = extraction_service.extract_and_save_article(
+            article_id, self.database, processed_dir=self.processed_dir,
+        )
+        second = extraction_service.extract_and_save_article(
+            article_id, self.database, processed_dir=self.processed_dir,
+        )
+
+        self.assertEqual([record["accident_id"] for record in first], [record["accident_id"] for record in second])
+        self.assertEqual(len(db.list_accident_records(path=self.database)), len(first))
 
     def test_detects_duplicate_by_normalized_url_and_text(self):
         article_service.save_article(self.article(), self.database)

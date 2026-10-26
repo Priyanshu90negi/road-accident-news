@@ -162,10 +162,12 @@ st.caption("Collect English or Hindi reports for any year, review extracted fact
 page = st.sidebar.radio(
     "Workflow",
     ["Collect article", "Upload News Screenshot", "Articles", "Review records", "Yearly data", "CSV export"],
+    index=0,
 )
 
 if page == "Collect article":
     st.header("Add a news article")
+    st.caption("Recommended workflow: paste the complete article, save it, then review the extracted accident details.")
     with st.form("article-entry"):
         headline = st.text_input("News headline *")
         article_text = st.text_area("Full article text *", height=420, max_chars=None, help="Paste the complete article. The saved source text is kept unchanged.")
@@ -207,8 +209,13 @@ if page == "Collect article":
 
 elif page == "Upload News Screenshot":
     st.header("Upload News Screenshot")
+    screenshot_ocr_enabled = screenshot_service.screenshot_ocr_enabled()
+    if screenshot_ocr_enabled:
+        st.warning("Automatic OCR is enabled for this session. Review and correct its text before extraction.")
+    else:
+        st.info(screenshot_service.SCREENSHOT_OCR_DISABLED_NOTICE)
     st.caption(
-        "Upload one or more screenshots from the same article. Originals and page-level OCR are retained; "
+        "Upload one or more screenshots from the same article. Originals and page-level audit metadata are retained; "
         "only an approved incident is added to the verified dataset."
     )
     uploads = st.file_uploader(
@@ -227,7 +234,8 @@ elif page == "Upload News Screenshot":
         with meta_right:
             screenshot_published = st.text_input("Publication date (YYYY-MM-DD; blank if unknown)")
             screenshot_language = st.selectbox("Article language", ["Unknown", "English", "Hindi"])
-        create_screenshot = st.form_submit_button("Create draft and run OCR")
+        submit_label = "Create draft and run OCR" if screenshot_ocr_enabled else "Save screenshot draft"
+        create_screenshot = st.form_submit_button(submit_label)
     if create_screenshot:
         try:
             screenshot_id = screenshot_service.create_draft(
@@ -241,7 +249,10 @@ elif page == "Upload News Screenshot":
                 },
             )
             st.session_state["active_screenshot_article_id"] = screenshot_id
-            st.success(f"Draft {screenshot_id} created. Check the OCR and correct the article text below.")
+            if screenshot_ocr_enabled:
+                st.success(f"Draft {screenshot_id} created. Review and correct the OCR text before extraction.")
+            else:
+                st.success(f"Draft {screenshot_id} created. Review the screenshots and enter the article text manually.")
             st.rerun()
         except screenshot_service.DuplicateScreenshotError as error:
             st.error(f"{error} Open that existing screenshot article to review it.")
@@ -298,15 +309,19 @@ elif page == "Upload News Screenshot":
                         st.image(str(image_path), width="stretch")
                     else:
                         st.warning(f"Original image file is missing: {image_path}")
-                    status = selected_page["readability_status"]
-                    if status == "unreadable":
-                        st.error("OCR could not read this image. Transcribe it manually in the article text field.")
-                    elif status == "uncertain":
-                        st.warning("OCR is uncertain on this page. Check names, dates, locations, and counts against the image.")
+                    ocr_was_attempted = screenshot_draft.get("extraction_method") == "tesseract-eng+hin"
+                    if ocr_was_attempted:
+                        status = selected_page["readability_status"]
+                        if status == "unreadable":
+                            st.error("OCR could not read this image. Transcribe it manually in the article text field.")
+                        elif status == "uncertain":
+                            st.warning("OCR is uncertain on this page. Check names, dates, locations, and counts against the image.")
+                        else:
+                            st.success(f"OCR confidence: {selected_page['ocr_confidence'] or 'unknown'}%")
+                        if selected_page.get("ocr_error"):
+                            st.caption(f"OCR note: {selected_page['ocr_error']}")
                     else:
-                        st.success(f"OCR confidence: {selected_page['ocr_confidence'] or 'unknown'}%")
-                    if selected_page.get("ocr_error"):
-                        st.caption(f"OCR note: {selected_page['ocr_error']}")
+                        st.caption("OCR was not run for this page. Transcribe its text in the article field.")
                     with st.expander("Raw OCR output for this page"):
                         st.text_area(
                             "Raw OCR output (preserved)", value=selected_page["raw_ocr_text"],

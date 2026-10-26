@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -39,6 +38,10 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_IMAGE_PIXELS = 50_000_000
 DEFAULT_TESSERACT_FALLBACK = Path(r"D:\tesseract\tesseract.exe")
+SCREENSHOT_OCR_FLAG = "ENABLE_SCREENSHOT_OCR"
+SCREENSHOT_OCR_DISABLED_NOTICE = (
+    "Automatic OCR is temporarily disabled. Upload and retain screenshots, then transcribe the article text manually."
+)
 
 
 class OCRUnavailableError(RuntimeError):
@@ -51,6 +54,11 @@ class ScreenshotValidationError(ValueError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def screenshot_ocr_enabled() -> bool:
+    """Return whether screenshot OCR is explicitly enabled for this process."""
+    return os.environ.get(SCREENSHOT_OCR_FLAG, "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _configure_pytesseract(binary: str) -> None:
@@ -189,16 +197,6 @@ def tesseract_languages() -> set[str]:
     return languages
 
 
-def _run_tesseract(args: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            args, capture_output=True, check=False, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise OCRUnavailableError(f"Tesseract OCR could not process this image: {error}") from error
-
-
 def _read_confidence(tsv_text: str) -> float | None:
     values: list[float] = []
     for row in csv.DictReader(io.StringIO(tsv_text), delimiter="\t"):
@@ -214,32 +212,34 @@ def _read_confidence(tsv_text: str) -> float | None:
     return round(sum(values) / len(values), 2)
 
 
-def _preprocess_image(image_bytes: bytes) -> Image.Image:
+def _open_uploaded_image(image_source: bytes | str | Path) -> Image.Image:
     try:
-        image = Image.open(io.BytesIO(image_bytes))
-        if image.width * image.height > MAX_IMAGE_PIXELS:
-            raise ScreenshotValidationError("Image is too large to process safely.")
-        image = ImageOps.exif_transpose(image).convert("RGB")
-        image = ImageOps.grayscale(image)
-        image = ImageOps.autocontrast(image, cutoff=1)
-        largest_side = max(image.size)
-        if largest_side < 1800:
-            scale = min(2.0, 1800 / largest_side)
-            image = image.resize(
-                (round(image.width * scale), round(image.height * scale)),
-                Image.Resampling.LANCZOS,
-            )
-        return image
+        source = io.BytesIO(image_source) if isinstance(image_source, bytes) else image_source
+        with Image.open(source) as uploaded_image:
+            if uploaded_image.width * uploaded_image.height > MAX_IMAGE_PIXELS:
+                raise ScreenshotValidationError("Image is too large to process safely.")
+            return ImageOps.exif_transpose(uploaded_image).convert("RGB")
     except ScreenshotValidationError:
         raise
     except Exception as error:
-        raise ScreenshotValidationError(f"Could not read image: {error}") from error
+        raise ScreenshotValidationError(f"Could not open uploaded image: {error}") from error
 
 
-def ocr_image(image_bytes: bytes, filename: str = "screenshot.png") -> dict[str, Any]:
-    """Preprocess and OCR one image; retain low-confidence and unreadable outcomes."""
+def _unreadable_ocr(error: str) -> dict[str, Any]:
+    return {
+        "raw_ocr_text": "", "ocr_confidence": None,
+        "readability_status": "unreadable", "ocr_error": error,
+    }
+
+
+def ocr_image(image_source: bytes | str | Path, filename: str = "screenshot.png") -> dict[str, Any]:
+    """OCR the uploaded image through pytesseract and retain its raw text and outcome."""
     try:
         binary = _tesseract_binary()
+        if pytesseract is None:
+            raise OCRUnavailableError(
+                "The pytesseract Python package is unavailable; install the project requirements to run screenshot OCR."
+            )
         available, data_directory = _tesseract_language_info(binary)
         missing = {"eng", "hin"} - available
         missing_files = _missing_required_language_files(binary, data_directory)
@@ -250,55 +250,50 @@ def ocr_image(image_bytes: bytes, filename: str = "screenshot.png") -> dict[str,
             if missing_files:
                 details.append("trained-data files not found: " + ", ".join(missing_files))
             raise OCRUnavailableError("Tesseract is missing required language data (" + "; ".join(details) + ").")
-        image = _preprocess_image(image_bytes)
-        with tempfile.TemporaryDirectory(prefix="accident-ocr-") as temp_dir:
-            input_path = Path(temp_dir) / "preprocessed.png"
-            image.save(input_path, format="PNG", dpi=(300, 300))
-
-            # OSD is best-effort: sparse or blurry pages may not have enough signal.
-            orientation = _run_tesseract(
-                [binary, str(input_path), "stdout", "-l", "osd", "--psm", "0"], timeout=20
-            )
-            if orientation.returncode == 0:
-                match = re.search(r"Rotate:\s*(\d+)", orientation.stdout)
-                if match:
-                    degrees = int(match.group(1)) % 360
-                    if degrees:
-                        image = image.rotate(-degrees, expand=True)
-                        image.save(input_path, format="PNG", dpi=(300, 300))
-
-            text_result = _run_tesseract(
-                [binary, str(input_path), "stdout", "-l", "eng+hin", "--psm", "3"]
-            )
-            if text_result.returncode != 0:
-                error_text = (text_result.stderr or "Tesseract returned an error.").strip()
-                return {
-                    "raw_ocr_text": "", "ocr_confidence": None,
-                    "readability_status": "unreadable", "ocr_error": error_text,
-                }
-            confidence_result = _run_tesseract(
-                [binary, str(input_path), "stdout", "-l", "eng+hin", "--psm", "3", "tsv"]
-            )
-            raw_text = text_result.stdout.rstrip("\r\n")
-            confidence = _read_confidence(confidence_result.stdout)
-            useful_chars = re.findall(r"[A-Za-z0-9\u0900-\u097f]", raw_text)
-            if len(useful_chars) < 8 or not raw_text.strip():
-                status = "unreadable"
-            elif confidence is None or confidence < 50:
-                status = "uncertain"
-            else:
-                status = "readable"
-            return {
-                "raw_ocr_text": raw_text,
-                "ocr_confidence": confidence,
-                "readability_status": status,
-                "ocr_error": None,
-            }
     except OCRUnavailableError as error:
-        return {
-            "raw_ocr_text": "", "ocr_confidence": None,
-            "readability_status": "unreadable", "ocr_error": str(error),
-        }
+        return _unreadable_ocr(str(error))
+
+    image = _open_uploaded_image(image_source)
+    try:
+        _configure_pytesseract(binary)
+        raw_text = pytesseract.image_to_string(image, lang="eng+hin").rstrip("\r\n")
+    except pytesseract.pytesseract.TesseractNotFoundError as error:
+        return _unreadable_ocr(
+            f"pytesseract could not run the configured Tesseract executable {binary!r}: {error}"
+        )
+    except pytesseract.pytesseract.TesseractError as error:
+        return _unreadable_ocr(f"Tesseract OCR failed while reading the uploaded image: {error}")
+
+    confidence = None
+    confidence_error = None
+    try:
+        _configure_pytesseract(binary)
+        confidence_tsv = pytesseract.image_to_data(
+            image,
+            lang="eng+hin",
+            output_type=pytesseract.Output.STRING,
+        )
+        confidence = _read_confidence(confidence_tsv)
+    except pytesseract.pytesseract.TesseractNotFoundError as error:
+        return _unreadable_ocr(
+            f"pytesseract could not run the configured Tesseract executable {binary!r}: {error}"
+        )
+    except pytesseract.pytesseract.TesseractError as error:
+        confidence_error = f"Tesseract returned OCR text but confidence could not be calculated: {error}"
+
+    useful_chars = re.findall(r"[A-Za-z0-9\u0900-\u097f]", raw_text)
+    if len(useful_chars) < 8 or not raw_text.strip():
+        status = "unreadable"
+    elif confidence is None or confidence < 50:
+        status = "uncertain"
+    else:
+        status = "readable"
+    return {
+        "raw_ocr_text": raw_text,
+        "ocr_confidence": confidence,
+        "readability_status": status,
+        "ocr_error": confidence_error,
+    }
 
 
 def _validate_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -332,9 +327,9 @@ def create_draft(
     *,
     image_root: str | Path | None = None,
     db_path: str | Path | None = None,
-    ocr_function: Callable[[bytes, str], dict[str, Any]] | None = None,
+    ocr_function: Callable[[bytes | Path, str], dict[str, Any]] | None = None,
 ) -> str:
-    """Save original images, OCR output and article metadata as one draft."""
+    """Save screenshot originals, optional OCR output and article metadata as one draft."""
     if not uploads:
         raise ScreenshotValidationError("Upload at least one JPG, JPEG, or PNG screenshot.")
     cleaned_metadata = _validate_metadata(metadata)
@@ -373,7 +368,9 @@ def create_draft(
     article_dir = root / screenshot_article_id
     page_data: list[dict[str, Any]] = []
     raw_outputs: list[str] = []
-    ocr = ocr_function or ocr_image
+    ocr = ocr_function
+    if ocr is None and screenshot_ocr_enabled():
+        ocr = ocr_image
     try:
         article_dir.mkdir(parents=True, exist_ok=False)
         for index, page in enumerate(prepared, start=1):
@@ -381,7 +378,16 @@ def create_draft(
             temporary = target.with_suffix(target.suffix + ".tmp")
             temporary.write_bytes(page["content"])
             os.replace(temporary, target)
-            ocr_result = ocr(page["content"], page["original_filename"])
+            if ocr is None:
+                ocr_result = {
+                    "raw_ocr_text": "",
+                    "ocr_confidence": None,
+                    "readability_status": "unreadable",
+                    "ocr_error": None,
+                }
+            else:
+                # OCR the persisted original so the uploaded file itself is the OCR input.
+                ocr_result = ocr(target, page["original_filename"])
             page_data.append({
                 "page_order": index,
                 "original_filename": page["original_filename"],
@@ -394,18 +400,15 @@ def create_draft(
                 "created_at": _now(),
             })
             raw_outputs.append(ocr_result.get("raw_ocr_text") or "")
-        aggregate = "\n\n".join(
-            f"[Screenshot {index}: {page['original_filename']}]\n{raw_outputs[index - 1]}"
-            for index, page in enumerate(prepared, start=1)
-        )
+        aggregate = "\n\n".join(output for output in raw_outputs if output)
         now = _now()
         db.insert_screenshot_draft(
             {
                 "screenshot_article_id": screenshot_article_id,
                 **cleaned_metadata,
                 "raw_ocr_text": aggregate,
-                "reviewed_article_text": aggregate,
-                "extraction_method": "tesseract-eng+hin",
+                "reviewed_article_text": aggregate if ocr is not None else "",
+                "extraction_method": "tesseract-eng+hin" if ocr is not None else "manual-screenshot-upload",
                 "created_at": now,
                 "updated_at": now,
             },

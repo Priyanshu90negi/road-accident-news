@@ -2,10 +2,11 @@
 
 ## Manual article collection and review
 
-The manual workflow lets you paste the complete English or Hindi article text
-into a Streamlit form. It stores the unchanged source article in a dedicated
-`accident_news.db`, runs local rule-based extraction, presents editable accident
-records for human review, and exports structured records as UTF-8-with-BOM CSV.
+The recommended and default **Collect article** workflow lets you paste the
+complete English or Hindi article text into a Streamlit form. It stores the
+unchanged source article in a dedicated `accident_news.db`, runs local
+rule-based extraction, presents editable accident records for human review,
+and exports structured records as UTF-8-with-BOM CSV.
 It does not require article scraping or a paid NLP service. Missing figures stay
 blank (SQLite `NULL`); an explicitly reported zero remains `0`. Possible
 cross-outlet incident duplicates and records outside the Dehradun district are
@@ -13,37 +14,31 @@ flagged for review.
 
 ## Screenshot-based collection
 
-The **Upload News Screenshot** page accepts JPG, JPEG, and PNG files. Upload
-multiple pages in one submission when they belong to the same article. The app
-keeps each original image under `data/screenshots/<article-id>/`, records its
-SHA-256 hash, and detects exact duplicate image uploads. To store screenshots in
-another folder, set `ACCIDENT_SCREENSHOT_DIR` before starting Streamlit.
+The **Upload News Screenshot** page remains available for JPG, JPEG, and PNG
+files, including multiple pages from one article. Original images, filenames,
+SHA-256 hashes, and draft metadata are retained; duplicate screenshots are
+rejected. To use another folder, set `ACCIDENT_SCREENSHOT_DIR` before starting
+Streamlit.
 
-OCR runs locally through Tesseract with the `eng` and `hin` language packs. It
-uses EXIF orientation, grayscale, contrast adjustment, optional orientation
-detection, and upscaling. Each page stores raw OCR text, confidence, and a
-readability flag in SQLite. The combined OCR text is shown separately from the
-editable corrected article text. Unreadable or uncertain pages remain available
-for manual transcription and review.
+Automatic OCR is temporarily disabled by default. In that mode the page displays
+the notice and lets a reviewer transcribe and save article text manually before running extraction.
+Screenshot upload does not check for or invoke Tesseract while OCR is disabled.
 
-Install Tesseract OCR 5 with both English (`eng`) and Hindi (`hin`) traineddata.
-If the executable is not on `PATH`, set its location in PowerShell before
-launching the app:
+The existing OCR implementation remains available behind the
+`ENABLE_SCREENSHOT_OCR` feature flag, which defaults to disabled. To re-enable
+OCR for future development, set the flag to `true` before launching Streamlit.
+The executable can be configured with `TESSERACT_CMD`; otherwise the app checks
+`PATH` and then `TESSERACT_FALLBACK_CMD` (default `D:\tesseract\tesseract.exe`):
 
 ```powershell
-$env:TESSERACT_CMD = "C:\Program Files\Tesseract-OCR\tesseract.exe"
+$env:ENABLE_SCREENSHOT_OCR = "true"
+$env:TESSERACT_CMD = "D:\tesseract\tesseract.exe"
 ```
 
-The app checks that the selected executable runs with `--version`, configures
-`pytesseract` to use it, and verifies the `eng` and `hin` language codes and
-trained-data files. If Tesseract is absent from `PATH` and `TESSERACT_CMD` is
-unset, it checks `D:\tesseract\tesseract.exe`. Override that fallback when
-needed with `TESSERACT_FALLBACK_CMD`.
-
-Then start the app using the setup command above. In **Upload News Screenshot**:
+With OCR disabled, use **Upload News Screenshot** as follows:
 
 1. Upload one or more screenshots and enter any known article metadata.
-2. Check the original image and raw OCR; correct the separate article text.
+2. Check the original image and manually transcribe the separate article text.
 3. Save the article draft, then extract accident details from the saved text.
 4. Review the fields and supporting text evidence. Save as draft, reject, or
    approve each incident. Only approval writes the record to the central

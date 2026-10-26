@@ -9,7 +9,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from PIL import Image, ImageFilter
 
@@ -72,7 +72,9 @@ class ScreenshotWorkflowTests(unittest.TestCase):
         self.assertEqual(len(draft["pages"]), 2)
         self.assertIn("English page one", draft["raw_ocr_text"])
         self.assertIn("Continuation: English page one", draft["raw_ocr_text"])
+        self.assertNotIn("page-1.png", draft["raw_ocr_text"])
         self.assertEqual([page["page_order"] for page in draft["pages"]], [1, 2])
+        self.assertEqual([page["original_filename"] for page in draft["pages"]], ["page-1.png", "page-2.png"])
         for page in draft["pages"]:
             self.assertTrue(Path(page["image_path"]).is_file())
             self.assertEqual(
@@ -134,6 +136,77 @@ class ScreenshotWorkflowTests(unittest.TestCase):
         )
         extracted = screenshot_service.extract_draft_records(screenshot_id, self.database)
         self.assertEqual(len(extracted), 1)
+
+    def test_screenshot_upload_preserves_pages_without_ocr_by_default(self):
+        uploads = [
+            ("page-1.png", self.image_bytes((255, 230, 210))),
+            ("page-2.png", self.image_bytes((220, 240, 255))),
+        ]
+        with (
+            patch.dict(os.environ, {"ENABLE_SCREENSHOT_OCR": "false"}),
+            patch("services.screenshot_service._tesseract_binary", side_effect=AssertionError("Tesseract must not be checked")),
+            patch("services.screenshot_service.ocr_image", side_effect=AssertionError("OCR must not run")),
+        ):
+            screenshot_id = screenshot_service.create_draft(
+                uploads,
+                {"headline": "Sample screenshot article", "language": "English"},
+                image_root=self.images,
+                db_path=self.database,
+            )
+
+        draft = screenshot_service.get_draft(screenshot_id, self.database)
+        self.assertEqual(len(draft["pages"]), 2)
+        self.assertEqual([page["original_filename"] for page in draft["pages"]], ["page-1.png", "page-2.png"])
+        self.assertTrue(all(Path(page["image_path"]).is_file() for page in draft["pages"]))
+        self.assertEqual(draft["raw_ocr_text"], "")
+        self.assertEqual(draft["reviewed_article_text"], "")
+        self.assertEqual(draft["extraction_method"], "manual-screenshot-upload")
+        self.assertTrue(all(page["ocr_error"] is None for page in draft["pages"]))
+
+        manual_text = "A car crash occurred in Dehradun on 2025-02-03. Two people were injured."
+        screenshot_service.save_draft(
+            screenshot_id,
+            {
+                "headline": "Sample screenshot article",
+                "source_name": "Example News",
+                "source_url": "",
+                "published_date": "2025-02-04",
+                "language": "English",
+                "reviewed_article_text": manual_text,
+            },
+            self.database,
+        )
+        saved = screenshot_service.get_draft(screenshot_id, self.database)
+        self.assertEqual(saved["reviewed_article_text"], manual_text)
+        self.assertEqual(saved["raw_ocr_text"], "")
+        self.assertNotIn("page-1.png", saved["reviewed_article_text"])
+        self.assertEqual(len(screenshot_service.extract_draft_records(screenshot_id, self.database)), 1)
+
+    def test_screenshot_ocr_can_be_reenabled_with_feature_flag(self):
+        image = self.image_bytes((200, 230, 250))
+        fake_result = {
+            "raw_ocr_text": "Feature flag test text", "ocr_confidence": 90,
+            "readability_status": "readable", "ocr_error": None,
+        }
+        with (
+            patch.dict(os.environ, {"ENABLE_SCREENSHOT_OCR": "true"}),
+            patch("services.screenshot_service.ocr_image", return_value=fake_result) as ocr,
+        ):
+            self.assertTrue(screenshot_service.screenshot_ocr_enabled())
+            screenshot_id = screenshot_service.create_draft(
+                [("flagged.png", image)], {}, image_root=self.images, db_path=self.database,
+            )
+
+        draft = screenshot_service.get_draft(screenshot_id, self.database)
+        self.assertEqual(draft["raw_ocr_text"], "Feature flag test text")
+        self.assertEqual(draft["reviewed_article_text"], "Feature flag test text")
+        self.assertEqual(ocr.call_count, 1)
+        self.assertTrue(Path(ocr.call_args.args[0]).is_file())
+
+    def test_screenshot_ocr_feature_defaults_off_when_flag_is_unset(self):
+        with patch.dict(os.environ):
+            os.environ.pop("ENABLE_SCREENSHOT_OCR", None)
+            self.assertFalse(screenshot_service.screenshot_ocr_enabled())
 
     def test_tesseract_discovery_configures_pytesseract_command(self):
         pytesseract_stub = SimpleNamespace(pytesseract=SimpleNamespace(tesseract_cmd=""))
@@ -198,6 +271,58 @@ class ScreenshotWorkflowTests(unittest.TestCase):
         self.assertEqual(result["readability_status"], "unreadable")
         self.assertIn("language codes not listed: hin", result["ocr_error"])
         self.assertIn("hin.traineddata", result["ocr_error"])
+
+    def test_successful_pytesseract_ocr_uses_uploaded_image_and_configures_each_call(self):
+        image_path = self.root / "uploaded.png"
+        image_path.write_bytes(self.image_bytes())
+        tsv = (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "5\t1\t1\t1\t1\t1\t0\t0\t100\t30\t93.5\tDehradun\n"
+        )
+        with (
+            patch("services.screenshot_service._tesseract_binary", return_value=r"D:\tesseract\tesseract.exe"),
+            patch("services.screenshot_service._tesseract_language_info", return_value=({"eng", "hin"}, None)),
+            patch("services.screenshot_service._missing_required_language_files", return_value=[]),
+            patch("services.screenshot_service._configure_pytesseract") as configure,
+            patch("services.screenshot_service.Image.open", wraps=Image.open) as image_open,
+            patch(
+                "services.screenshot_service.pytesseract.image_to_string",
+                return_value="Dehradun road accident report",
+            ) as image_to_string,
+            patch("services.screenshot_service.pytesseract.image_to_data", return_value=tsv),
+        ):
+            result = screenshot_service.ocr_image(image_path, "uploaded.png")
+
+        self.assertEqual(result["readability_status"], "readable")
+        self.assertEqual(result["raw_ocr_text"], "Dehradun road accident report")
+        self.assertTrue(any(args.args[0] == image_path for args in image_open.call_args_list))
+        self.assertIsInstance(image_to_string.call_args.args[0], Image.Image)
+        configure.assert_has_calls([call(r"D:\tesseract\tesseract.exe")] * 2)
+
+    def test_genuine_ocr_errors_are_not_reported_as_tesseract_missing(self):
+        image_path = self.root / "uploaded.png"
+        image_path.write_bytes(self.image_bytes())
+        tesseract_error = screenshot_service.pytesseract.pytesseract.TesseractError(
+            1, "Synthetic OCR engine failure",
+        )
+        with (
+            patch("services.screenshot_service._tesseract_binary", return_value=r"D:\tesseract\tesseract.exe"),
+            patch("services.screenshot_service._tesseract_language_info", return_value=({"eng", "hin"}, None)),
+            patch("services.screenshot_service._missing_required_language_files", return_value=[]),
+            patch("services.screenshot_service.pytesseract.image_to_string", side_effect=tesseract_error),
+        ):
+            result = screenshot_service.ocr_image(image_path, "uploaded.png")
+
+        self.assertEqual(result["readability_status"], "unreadable")
+        self.assertIn("Synthetic OCR engine failure", result["ocr_error"])
+        self.assertNotIn("not found", result["ocr_error"].lower())
+
+    def test_invalid_uploaded_image_path_stays_an_image_error(self):
+        with self.assertRaises(screenshot_service.ScreenshotValidationError) as error:
+            screenshot_service.ocr_image(self.root / "missing-image.png")
+
+        self.assertIn("Could not open uploaded image", str(error.exception))
+        self.assertNotIn("Tesseract", str(error.exception))
 
     def test_conflicting_counts_and_missing_dates_are_not_invented(self):
         conflict_text = (
@@ -320,15 +445,18 @@ class ScreenshotWorkflowTests(unittest.TestCase):
         self.assertEqual(hindi["readability_status"], "readable")
         self.assertIn("देहरादून", hindi["raw_ocr_text"])
         sample_upload = (fixture_dir / "ocr_english_smoke.png").read_bytes()
-        screenshot_id = screenshot_service.create_draft(
-            [("sample-news-screenshot.png", sample_upload)],
-            {"headline": "Sample road accident report", "language": "English"},
-            image_root=self.images,
-            db_path=self.database,
-        )
+        with patch.dict(os.environ, {"ENABLE_SCREENSHOT_OCR": "true"}):
+            screenshot_id = screenshot_service.create_draft(
+                [("sample-news-screenshot.png", sample_upload)],
+                {"headline": "Sample road accident report", "language": "English"},
+                image_root=self.images,
+                db_path=self.database,
+            )
         uploaded_draft = screenshot_service.get_draft(screenshot_id, self.database)
         self.assertIn("Dehradun", uploaded_draft["raw_ocr_text"])
         self.assertIn("Dehradun", uploaded_draft["pages"][0]["raw_ocr_text"])
+        self.assertIn("Dehradun", uploaded_draft["reviewed_article_text"])
+        self.assertNotIn("sample-news-screenshot.png", uploaded_draft["reviewed_article_text"])
 
         english_image = Image.open(fixture_dir / "ocr_english_smoke.png").filter(ImageFilter.GaussianBlur(radius=8))
         blurry_bytes = BytesIO()
