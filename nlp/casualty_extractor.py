@@ -42,6 +42,12 @@ ZERO_INJURIES = re.compile(
     re.IGNORECASE,
 )
 NEGATED_CASUALTY = re.compile(r"\b(?:not|never|no)\s+(?:(?:been|reported\s+as)\s+)?$", re.IGNORECASE)
+SINGULAR_DEATH = re.compile(
+    r"\b(?:a|an|one|the)?\s*(?:\d{1,3}[- ]year[- ]old\s+)?"
+    r"(?:person|man|woman|boy|girl|driver|passenger|rider|victim)\b"
+    r".{0,35}\b(?:was\s+)?(?:killed|dead|died|succumbed)\b",
+    re.IGNORECASE,
+)
 
 
 def _number_value(token: str) -> int:
@@ -54,7 +60,9 @@ def extract_count(text: str, kind: str) -> tuple[int | None, str]:
     text = clean_text(text)
     if kind not in {"deaths", "injuries"}:
         raise ValueError("kind must be 'deaths' or 'injuries'")
-    terms = DEATH_TERMS if kind == "deaths" else INJURY_TERMS
+    terms = DEATH_TERMS if kind == "deaths" else re.compile(
+        rf"(?:{INJURY_TERMS.pattern})|\binjur(?:y|ies)\b", re.I
+    )
     zero_pattern = ZERO_DEATHS if kind == "deaths" else ZERO_INJURIES
     values: list[int] = []
     for sentence in re.split(r"(?<=[.!?।॥])\s+|\n+", text):
@@ -65,8 +73,16 @@ def extract_count(text: str, kind: str) -> tuple[int | None, str]:
             start, end = term.span()
             if NEGATED_CASUALTY.search(sentence[max(0, start - 18):start]):
                 continue
+            singular_death = SINGULAR_DEATH.search(sentence) if kind == "deaths" else None
+            if singular_death and singular_death.start() <= start and singular_death.end() >= end:
+                values.append(1)
+                continue
             nearby_start, nearby_end = max(0, start - 32), min(len(sentence), end + 18)
             candidates = list(NUMBER_PATTERN.finditer(sentence, nearby_start, nearby_end))
+            candidates = [
+                match for match in candidates
+                if not re.match(r"\s*[- ]year[- ]old\b", sentence[match.end():match.end() + 16], re.I)
+            ]
             before = [match for match in candidates if match.end() <= start]
             after = [match for match in candidates if match.start() >= end]
             if before or after:
@@ -75,6 +91,8 @@ def extract_count(text: str, kind: str) -> tuple[int | None, str]:
                     values.append(_number_value(nearest.group("number")))
                 except (KeyError, ValueError):
                     continue
+            elif kind == "deaths" and SINGULAR_DEATH.search(sentence):
+                values.append(1)
     distinct = list(dict.fromkeys(values))
     if len(distinct) == 1:
         return distinct[0], "extracted"

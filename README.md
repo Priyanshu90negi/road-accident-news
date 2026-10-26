@@ -186,7 +186,10 @@ separate from extraction outcomes. Extraction outcomes include
 explicitly means the configured sample limit prevented an attempt; it does not
 indicate a site block. Reasons are retained in the raw CSV.
 
-Accident dates and casualty counts are not inferred from publication dates.
+Incident dates come from accident wording in the article. If the article gives a
+month and day but omits the year, the publication year completes the date only
+when the resulting date is not later than publication. Casualty counts are not
+inferred from publication dates.
 Causes are marked `suspected`; unsupported values are `unknown`. Heuristic
 English/Hindi extraction is not fact verification. Review article URLs and
 records flagged for review before research or publication. For an initial

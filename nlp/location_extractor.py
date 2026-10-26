@@ -134,6 +134,9 @@ LOCALITIES = {
 }
 
 
+LOCALITIES.update({"Chillad": ("Chillad",), "Tyuni": ("Tyuni",)})
+
+
 def extract_location(text: str) -> tuple[str | None, str | None, str]:
     text = clean_text(text)
     matches: list[tuple[int, int, str]] = []
@@ -163,7 +166,7 @@ def extract_location(text: str) -> tuple[str | None, str | None, str]:
         return None, None, "unknown"
     matches.sort()
     areas = list(dict.fromkeys(item[2] for item in matches if item[2] != "Dehradun"))
-    area = areas[0] if areas else None
+    area = ", ".join(areas) if areas else None
     district_mentioned = bool(re.search(r"(?<!\w)Dehradun(?!\w)|देहरादून", text, re.IGNORECASE))
     if area:
         status = "ambiguous" if len(areas) > 1 else "extracted"
@@ -171,3 +174,13 @@ def extract_location(text: str) -> tuple[str | None, str | None, str]:
     if district_mentioned:
         return "Dehradun", None, "district_only"
     return None, None, "unknown"
+
+
+def extract_state(text: str, district: str | None) -> str | None:
+    """Return an explicitly named state or a state mapped from its district."""
+    text = clean_text(text)
+    if re.search(r"(?<!\w)Uttarakhand(?!\w)|(?<!\w)Uttaranchal(?!\w)", text, re.IGNORECASE):
+        return "Uttarakhand"
+    if district and district.casefold() == "dehradun":
+        return "Uttarakhand"
+    return None

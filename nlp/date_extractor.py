@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date
 
-from .accident_detector import ACCIDENT_PATTERN
+from .accident_detector import ACCIDENT_PATTERN, is_accident_relevant
 from .preprocess import clean_text
 from .ner import extract_named_entities
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 MONTHS = {
@@ -26,6 +30,10 @@ DATE_PATTERNS = (
     re.compile(rf"(?<![\w])([0-3]?\d)(?:st|nd|rd|th)?\s+({MONTH_PATTERN})\s*,?\s*(\d{{4}})(?!\d)", re.I),
     re.compile(rf"(?<![\w])({MONTH_PATTERN})\s+([0-3]?\d)(?:st|nd|rd|th)?,?\s+(\d{{4}})(?!\d)", re.I),
 )
+PARTIAL_DATE_PATTERNS = (
+    re.compile(rf"(?<![\w])([0-3]?\d)(?:st|nd|rd|th)?\s+({MONTH_PATTERN})\b(?!\s*,?\s*\d{{4}})", re.I),
+    re.compile(rf"(?<![\w])({MONTH_PATTERN})\b\s+([0-3]?\d)(?:st|nd|rd|th)?(?!\s*,?\s*\d{{4}})", re.I),
+)
 
 
 def _parse_date_patterns(text: str) -> list[tuple[int, int, str]]:
@@ -43,6 +51,7 @@ def _parse_date_patterns(text: str) -> list[tuple[int, int, str]]:
                 else:
                     parsed = date(int(match[3]), MONTHS[match[1].casefold()], int(match[2]))
             except (ValueError, KeyError):
+                LOGGER.warning("Date parsing failed for text %r", match.group(0))
                 continue
             found.append((match.start(), match.end(), parsed.isoformat()))
     return found
@@ -64,11 +73,44 @@ def extract_date_mentions(text: str) -> list[str]:
     return list(dict.fromkeys(value for _, _, value in _date_candidates(clean_text(text))))
 
 
-def extract_accident_date(text: str) -> tuple[str | None, str]:
-    """Return (ISO date, status); dates need nearby incident wording."""
+def _inferred_partial_date_candidates(
+    text: str, published_date: str | None
+) -> list[tuple[int, int, str]]:
+    if not published_date:
+        return []
+    try:
+        publication = date.fromisoformat(str(published_date)[:10])
+    except ValueError:
+        LOGGER.warning("Cannot infer incident year from invalid publication date %r", published_date)
+        return []
+
+    found: list[tuple[int, int, str]] = []
+    for index, pattern in enumerate(PARTIAL_DATE_PATTERNS):
+        for match in pattern.finditer(text):
+            try:
+                if index == 0:
+                    day, month = int(match[1]), MONTHS[match[2].casefold()]
+                else:
+                    month, day = MONTHS[match[1].casefold()], int(match[2])
+                inferred = date(publication.year, month, day)
+            except (ValueError, KeyError):
+                LOGGER.warning("Partial date parsing failed for text %r", match.group(0))
+                continue
+            if (inferred.month, inferred.day) > (publication.month, publication.day):
+                continue
+            found.append((match.start(), match.end(), inferred.isoformat()))
+    return found
+
+
+def extract_accident_date(
+    text: str, published_date: str | None = None
+) -> tuple[str | None, str]:
+    """Return (ISO date, status), inferring a missing year only from a valid publication date."""
     contextual_dates: list[str] = []
     for sentence in re.split(r"(?<=[.!?।॥])\s+|\n+", clean_text(text)):
         candidates = _date_candidates(sentence)
+        candidates.extend(_inferred_partial_date_candidates(sentence, published_date))
+        candidates.sort()
         if not candidates:
             continue
         for start, end, value in candidates:
@@ -88,7 +130,8 @@ def extract_accident_date(text: str) -> tuple[str | None, str]:
                 re.IGNORECASE,
             )
             has_incident_context = bool(
-                ACCIDENT_PATTERN.search(nearby)
+                is_accident_relevant(sentence)
+                or ACCIDENT_PATTERN.search(nearby)
                 or re.search(
                     r"\b(?:incident|occurred|happened|took\s+place|vehicle\s+lost\s+control)\b|"
                     r"घटना|हुआ|हुई|हुए|के\s+दौरान|में\s+हादसा",

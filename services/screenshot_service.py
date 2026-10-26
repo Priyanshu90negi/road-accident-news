@@ -392,7 +392,7 @@ def save_draft_record(
     values = json.loads(current["record_json"] or "{}")
     allowed = {
         "headline", "published_date", "language", "source_name", "source_url",
-        "accident_date", "accident_time", "district", "area", "accident_type", "cause",
+        "accident_date", "accident_time", "state", "district", "area", "accident_type", "cause",
         "cause_status", "vehicles_involved", "deaths", "injuries", "weather",
     }
     values.update({key: value for key, value in updates.items() if key in allowed})
@@ -407,7 +407,7 @@ def save_draft_record(
         extracted_values = {}
     sources = {}
     for field in (
-        "accident_date", "accident_time", "district", "area", "accident_type", "cause",
+        "accident_date", "accident_time", "state", "district", "area", "accident_type", "cause",
         "vehicles_involved", "deaths", "injuries", "weather",
     ):
         automatic = extracted_values.get(field)

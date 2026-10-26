@@ -18,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "accident_news.db"
 RECORD_FIELDS = (
     "headline", "published_date", "language", "source_name", "source_url", "source_url_key",
-    "accident_date", "occurrence_year", "accident_time", "district", "area", "accident_type",
+    "accident_date", "occurrence_year", "accident_time", "state", "district", "area", "accident_type",
     "cause", "cause_status", "vehicles_involved", "deaths", "injuries", "weather",
     "extraction_confidence", "review_status", "accident_date_status", "scope_status",
     "scope_reason", "possible_duplicate", "extracted_fields_json", "field_sources_json",
@@ -26,7 +26,7 @@ RECORD_FIELDS = (
 )
 EDITABLE_FIELDS = frozenset({
     "headline", "published_date", "language", "source_name", "source_url", "source_url_key",
-    "accident_date", "accident_time", "district", "area", "accident_type", "cause",
+    "accident_date", "accident_time", "state", "district", "area", "accident_type", "cause",
     "cause_status", "vehicles_involved", "deaths", "injuries", "weather", "review_status",
     "accident_date_status", "scope_status", "scope_reason",
 })
@@ -182,6 +182,18 @@ def _migrate_evidence_column(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_state_column(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(accident_records)")}
+    if columns and "state" not in columns:
+        connection.execute("ALTER TABLE accident_records ADD COLUMN state TEXT")
+        columns.add("state")
+    if "state" in columns:
+        connection.execute(
+            "UPDATE accident_records SET state = 'Uttarakhand' "
+            "WHERE state IS NULL AND lower(trim(coalesce(district, ''))) = 'dehradun'"
+        )
+
+
 def _migrate_record_table(connection: sqlite3.Connection, statements: list[str]) -> None:
     info = connection.execute("PRAGMA table_info(accident_records)").fetchall()
     if not info:
@@ -227,6 +239,7 @@ def _migrate_record_table(connection: sqlite3.Connection, statements: list[str])
                 "accident_date": accident_date,
                 "occurrence_year": occurrence_year,
                 "accident_time": old.get("accident_time"),
+                "state": old.get("state") or ("Uttarakhand" if district and district.casefold() == "dehradun" else None),
                 "district": district,
                 "area": old.get("area"),
                 "accident_type": old.get("accident_type"),
@@ -276,6 +289,7 @@ def initialize_database(path: str | Path | None = None) -> Path:
         _migrate_article_table(connection, statements)
         _migrate_record_table(connection, statements)
         _migrate_evidence_column(connection)
+        _migrate_state_column(connection)
         for statement in statements:
             if statement.casefold().startswith("create index"):
                 connection.execute(statement)

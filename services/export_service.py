@@ -13,7 +13,7 @@ from database import db
 
 EXPORT_FIELDS = (
     "accident_id", "record_key", "occurrence_year", "article_id", "headline", "published_date",
-    "accident_date", "accident_time", "district", "area", "accident_type", "cause",
+    "accident_date", "accident_time", "state", "district", "area", "accident_type", "cause",
     "vehicles_involved", "deaths", "injuries", "weather", "extraction_confidence",
     "review_status", "scope_status", "scope_reason", "possible_duplicate", "source_name",
     "source_url", "language",

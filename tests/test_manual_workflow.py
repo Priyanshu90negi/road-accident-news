@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from database import db
 from database.db import DuplicateArticleError
@@ -79,6 +80,182 @@ class ManualWorkflowTests(unittest.TestCase):
         self.assertEqual(record["deaths"], 1)
         self.assertEqual(record["injuries"], 2)
         self.assertEqual(article["article_text"], original)
+
+    def test_regression_ford_car_falls_into_gorge_article_extracts_and_saves(self):
+        text = (
+            "A 39-year-old man was killed and two others were injured after the Ford car they were "
+            "travelling in fell into a nearly 100-metre-deep gorge near Chillad in Tyuni, "
+            "Dehradun district, on October 2, SDRF officials said."
+        )
+        article_id = article_service.save_article(self.article(
+            headline="Man killed, two injured after car falls into gorge near Tyuni",
+            article_text=text,
+            source_name="Example News",
+            source_url="https://example.com/news/gorge-accident",
+            published_date="2026-10-03",
+        ), self.database)
+
+        diagnostics: list[str] = []
+        records = extraction_service.extract_and_save_article(
+            article_id, self.database, processed_dir=self.processed_dir, diagnostics=diagnostics
+        )
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["accident_date"], "2026-10-02")
+        self.assertIsNone(record["accident_time"])
+        self.assertEqual(record["state"], "Uttarakhand")
+        self.assertEqual(record["district"], "Dehradun")
+        self.assertEqual(record["area"], "Chillad, Tyuni")
+        self.assertEqual(record["vehicles_involved"], "car")
+        self.assertEqual(record["accident_type"], "car fell into a gorge")
+        self.assertEqual(record["deaths"], 1)
+        self.assertEqual(record["injuries"], 2)
+        self.assertIsNone(record["cause"])
+        self.assertEqual(record["source_name"], "Example News")
+        self.assertEqual(record["source_url"], "https://example.com/news/gorge-accident")
+        self.assertEqual(db.get_article(article_id, self.database)["article_text"], text)
+        self.assertEqual(diagnostics, [])
+
+    def test_accident_detection_accepts_overturns_crashes_and_collisions(self):
+        for text in (
+            "A bus overturned in Dehradun.",
+            "A truck crashed near Tyuni.",
+            "A car collided with a bus in Dehradun.",
+            "A car collides with a bus in Dehradun.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(len(extract_accidents(text)), 1)
+
+    def test_ndtv_ramming_article_is_saved_with_supported_fields(self):
+        text = (
+            "A car rammed into three vehicles in Raipur, Dehradun, allegedly under the influence "
+            "of alcohol."
+        )
+        article_id = article_service.save_article(self.article(
+            headline="Car rams into three vehicles in Raipur",
+            article_text=text,
+            source_name="NDTV",
+            source_url="https://www.ndtv.com/example/raipur-accident",
+            published_date="2026-10-03",
+            language="English",
+        ), self.database)
+
+        diagnostics: list[str] = []
+        with patch("services.extraction_service.extract_accidents", wraps=extract_accidents) as extractor:
+            records = extraction_service.extract_and_save_article(
+                article_id, self.database, processed_dir=self.processed_dir, diagnostics=diagnostics
+            )
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["article_id"], article_id)
+        extractor.assert_called_once()
+        self.assertEqual(extractor.call_args.args[0], text)
+        self.assertEqual(record["accident_type"], "collision")
+        self.assertEqual(record["vehicles_involved"], "car")
+        self.assertEqual(record["area"], "Raipur")
+        self.assertEqual(record["district"], "Dehradun")
+        self.assertEqual(record["cause"], "impaired driving")
+        self.assertEqual(record["cause_status"], "suspected")
+        self.assertIsNone(record["accident_date"])
+        self.assertIsNone(record["accident_time"])
+        self.assertIsNone(record["deaths"])
+        self.assertIsNone(record["injuries"])
+        self.assertEqual(record["source_name"], "NDTV")
+        self.assertEqual(db.get_article(article_id, self.database)["article_text"], text)
+        self.assertEqual(diagnostics, [])
+
+    def test_times_of_india_gorge_article_extracts_deaths_and_injuries(self):
+        text = (
+            "A car fell into a deep gorge near Chillad, Tyuni, Dehradun, resulting in one death "
+            "and two injuries."
+        )
+        article_id = article_service.save_article(self.article(
+            headline="One killed, two injured as car falls into gorge near Tyuni",
+            article_text=text,
+            source_name="Times of India",
+            source_url="https://timesofindia.indiatimes.com/example/tyuni-accident",
+            published_date="2026-10-03",
+            language="English",
+        ), self.database)
+
+        diagnostics: list[str] = []
+        records = extraction_service.extract_and_save_article(
+            article_id, self.database, processed_dir=self.processed_dir, diagnostics=diagnostics
+        )
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["article_id"], article_id)
+        self.assertEqual(record["accident_type"], "car fell into a gorge")
+        self.assertEqual(record["vehicles_involved"], "car")
+        self.assertEqual(record["area"], "Chillad, Tyuni")
+        self.assertEqual(record["district"], "Dehradun")
+        self.assertEqual(record["deaths"], 1)
+        self.assertEqual(record["injuries"], 2)
+        self.assertIsNone(record["accident_date"], "Publication date must not become incident date.")
+        self.assertIsNone(record["accident_time"])
+        self.assertIsNone(record["cause"])
+        self.assertEqual(record["source_name"], "Times of India")
+        self.assertEqual(db.get_article(article_id, self.database)["article_text"], text)
+        self.assertEqual(diagnostics, [])
+
+    def test_extraction_service_reports_detection_exception_and_invalid_output(self):
+        article_id = article_service.save_article(self.article(
+            article_text="The weather was clear across Dehradun.",
+            source_url="https://example.com/no-accident",
+        ), self.database)
+        diagnostics: list[str] = []
+        self.assertEqual(
+            extraction_service.extract_and_save_article(
+                article_id, self.database, diagnostics=diagnostics
+            ),
+            [],
+        )
+        self.assertTrue(any("Accident not detected" in item for item in diagnostics))
+
+        exception_article_id = article_service.save_article(self.article(
+            article_text="A car crashed in Dehradun.",
+            source_url="https://example.com/extraction-exception",
+        ), self.database)
+        diagnostics = []
+        with patch("services.extraction_service.extract_accidents", side_effect=RuntimeError("parser offline")):
+            self.assertEqual(
+                extraction_service.extract_and_save_article(
+                    exception_article_id, self.database, diagnostics=diagnostics
+                ),
+                [],
+            )
+        self.assertTrue(any("Extraction failed" in item for item in diagnostics))
+
+        invalid_article_id = article_service.save_article(self.article(
+            article_text="A bus overturned in Tyuni.",
+            source_url="https://example.com/invalid-output",
+        ), self.database)
+        diagnostics = []
+        with patch("services.extraction_service.extract_accidents", return_value={"bad": "shape"}):
+            self.assertEqual(
+                extraction_service.extract_and_save_article(
+                    invalid_article_id, self.database, diagnostics=diagnostics
+                ),
+                [],
+            )
+        self.assertTrue(any("Invalid output format" in item for item in diagnostics))
+
+    def test_extraction_service_reports_validation_rejection_and_zero_accepted(self):
+        article_id = article_service.save_article(self.article(
+            article_text="A car crashed in Dehradun.",
+            source_url="https://example.com/invalid-date-record",
+        ), self.database)
+        diagnostics: list[str] = []
+        with patch("services.extraction_service.extract_accidents", return_value=[{"accident_date": "not-a-date"}]):
+            records = extraction_service.extract_and_save_article(
+                article_id, self.database, diagnostics=diagnostics
+            )
+        self.assertEqual(records, [])
+        self.assertTrue(any("Record rejected during validation" in item for item in diagnostics))
+        self.assertTrue(any("zero records were accepted" in item for item in diagnostics))
 
     def test_hindi_dates_times_numbers_and_unicode(self):
         text = "9 जून 2025 को देहरादून में सड़क हादसा हुआ। दो लोग घायल हुए और एक व्यक्ति की मौत हो गई। रात 10 बजे बस और कार टकराईं।"

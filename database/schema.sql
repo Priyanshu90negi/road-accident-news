@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS accident_records (
         occurrence_year IS NULL OR (occurrence_year >= 1 AND occurrence_year <= 9999)
     ),
     accident_time TEXT,
+    state TEXT,
     district TEXT,
     area TEXT,
     accident_type TEXT,

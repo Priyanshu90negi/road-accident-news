@@ -9,7 +9,7 @@ from .preprocess import clean_text
 
 CAUSES = (
     (r"\b(?:overspeed(?:ing)?|speeding|high speed)\b|तेज\s+रफ्तार|तेज\s+गति", "speeding"),
-    (r"\b(?:drunk driving|drink[- ]driving|intoxicated)\b|नशे\s+में", "impaired driving"),
+    (r"\b(?:drunk driving|drink[- ]driving|intoxicated|under\s+the\s+influence\s+of\s+alcohol|alcohol[- ]influenced)\b|नशे\s+में", "impaired driving"),
     (r"\b(?:brake failure|brakes failed)\b|ब्रेक\s+फेल", "brake failure"),
     (r"\b(?:wrong[- ]side|wrong[- ]way)\b|गलत\s+दिशा", "wrong-side driving"),
     (r"\b(?:rash|reckless|negligent) driving\b|लापरवाही", "unsafe driving"),
@@ -63,6 +63,28 @@ def extract_cause(text: str) -> tuple[str | None, str]:
 
 def extract_accident_type(text: str) -> str | None:
     text = clean_text(text)
+    vehicle_fall = re.search(
+        r"\b(?P<verb>fell|plunged|tumbled|slid|rolled|dropped)\b"
+        r".{0,90}\b(?P<terrain>gorge|ravine|cliff|valley|river|canal|ditch|slope|embankment)\b",
+        text,
+        re.I,
+    )
+    if vehicle_fall:
+        vehicles = extract_vehicles(text)
+        vehicle = vehicles[0] if vehicles else "vehicle"
+        verb = vehicle_fall.group("verb").casefold()
+        return f"{vehicle} {verb} into a {vehicle_fall.group('terrain').casefold()}"
+    if re.search(
+        r"\b(?:ram(?:med|s|ming)?|hit|struck)\b.{0,90}\b(?:car|cars|vehicle|vehicles|bus|truck)\b|"
+        r"\b(?:car|cars|vehicle|vehicles|bus|truck)\b.{0,90}\b(?:ram(?:med|s|ming)?|hit|struck)\b",
+        text,
+        re.I,
+    ):
+        return "collision"
+    if re.search(r"\b(?:overturn(?:ed|ing|s)?|rollover|roll(?:ed|ing)?\s+over)\b", text, re.I):
+        return "rollover"
+    if re.search(r"\b(?:collision|collid(?:ed|ing|es)|crashed into|head[- ]on)\b", text, re.I):
+        return "collision"
     if re.search(r"\bhit[- ]and[- ]run\b|टक्कर\s+मारकर", text, re.I):
         return "hit-and-run"
     if re.search(r"\b(?:overturn(?:ed)?|rollover|overturned)\b|पलट(?:ा|ी|े)?", text, re.I):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -59,6 +60,8 @@ def _render_review(article_id: int) -> None:
     if not article:
         st.error("The selected article could not be found.")
         return
+    for warning in st.session_state.get(f"extraction-diagnostics-{article_id}", []):
+        st.warning(warning)
     records = db.list_accident_records(article_id)
     left, right = st.columns([0.9, 1.1], gap="large")
     with left:
@@ -68,6 +71,7 @@ def _render_review(article_id: int) -> None:
             f"{article.get('published_date') or 'publication date unknown'} · "
             f"{article.get('language') or 'language unknown'}"
         )
+        st.caption("The original article text below is retained with its source article.")
         if article.get("source_url"):
             st.link_button("Open source article", article["source_url"])
         else:
@@ -94,11 +98,18 @@ def _render_review(article_id: int) -> None:
                 f"Scope: {record['scope_status']} · Confidence: {confidence_label} · "
                 f"Cause status: {record['cause_status'] or 'unknown'}"
             )
+            try:
+                warnings = json.loads(record.get("conflict_notes_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                warnings = ["Validation warnings could not be read; check the extraction log."]
+            for warning in warnings:
+                st.warning(warning)
             with st.form(f"review-record-{record['accident_id']}"):
                 c1, c2 = st.columns(2)
                 with c1:
                     accident_date = st.text_input("Incident date (YYYY-MM-DD)", value=record["accident_date"] or "", key=f"date-{record['accident_id']}")
                     accident_time = st.text_input("Incident time (HH:MM)", value=record["accident_time"] or "", key=f"time-{record['accident_id']}")
+                    state = st.text_input("State", value=record.get("state") or "", key=f"state-{record['accident_id']}")
                     district = st.text_input("District", value=record["district"] or "", key=f"district-{record['accident_id']}")
                     area = st.text_input("Area / locality", value=record["area"] or "", key=f"area-{record['accident_id']}")
                     accident_type = st.text_input("Accident type", value=record["accident_type"] or "", key=f"type-{record['accident_id']}")
@@ -123,6 +134,7 @@ def _render_review(article_id: int) -> None:
                         {
                             "accident_date": accident_date,
                             "accident_time": accident_time,
+                            "state": state,
                             "district": district,
                             "area": area,
                             "accident_type": accident_type,
@@ -413,6 +425,7 @@ elif page == "Upload News Screenshot":
                                     record_published = st.text_input("Publication date (YYYY-MM-DD)", value=record.get("published_date") or "", key=f"sr-published-{record_id}")
                                     record_date = st.text_input("Accident date (YYYY-MM-DD; blank if unknown)", value=record.get("accident_date") or "", key=f"sr-date-{record_id}")
                                     record_time = st.text_input("Accident time (HH:MM; blank if unknown)", value=record.get("accident_time") or "", key=f"sr-time-{record_id}")
+                                    record_state = st.text_input("State", value=record.get("state") or "", key=f"sr-state-{record_id}")
                                     record_district = st.text_input("District", value=record.get("district") or "", key=f"sr-district-{record_id}")
                                     record_area = st.text_input("Locality / exact area", value=record.get("area") or "", key=f"sr-area-{record_id}")
                                     record_type = st.text_input("Accident type", value=record.get("accident_type") or "", key=f"sr-type-{record_id}")
@@ -439,6 +452,7 @@ elif page == "Upload News Screenshot":
                                 "published_date": record_published,
                                 "accident_date": record_date,
                                 "accident_time": record_time,
+                                "state": record_state,
                                 "district": record_district,
                                 "area": record_area,
                                 "accident_type": record_type,
@@ -526,9 +540,27 @@ elif page == "Review records":
         )
         if not db.list_accident_records(selected_id):
             if st.button("Run extraction"):
-                records = extraction_service.extract_and_save_article(selected_id)
-                st.success(f"Created {len(records)} accident record(s).")
-                st.rerun()
+                diagnostics: list[str] = []
+                should_rerun = False
+                try:
+                    records = extraction_service.extract_and_save_article(
+                        selected_id, diagnostics=diagnostics
+                    )
+                    st.session_state[f"extraction-diagnostics-{selected_id}"] = diagnostics
+                    if records:
+                        st.success(f"Created {len(records)} accident record(s).")
+                    else:
+                        st.warning("No accident records were saved. Review the diagnostics and article text below.")
+                    should_rerun = True
+                except YearlyCsvSyncError as error:
+                    st.session_state[f"extraction-diagnostics-{selected_id}"] = diagnostics
+                    st.error(_sync_failure_text(error))
+                except Exception as error:
+                    message = f"Extraction or validation failed: {error}"
+                    st.session_state[f"extraction-diagnostics-{selected_id}"] = [message]
+                    st.error(message)
+                if should_rerun:
+                    st.rerun()
         _render_review(selected_id)
 
 elif page == "Yearly data":
@@ -560,6 +592,7 @@ elif page == "Yearly data":
             with left:
                 accident_date = st.text_input("Accident date (YYYY-MM-DD; blank if unknown)")
                 published_date = st.text_input("Publication date (YYYY-MM-DD; blank if unknown)")
+                state = st.text_input("State")
                 district = st.text_input("District")
                 area = st.text_input("Area / locality")
                 accident_type = st.text_input("Accident type")
@@ -588,6 +621,7 @@ elif page == "Yearly data":
                         "headline": headline,
                         "accident_date": accident_date,
                         "published_date": published_date,
+                        "state": state,
                         "district": district,
                         "area": area,
                         "accident_type": accident_type,
@@ -700,6 +734,7 @@ elif page == "Yearly data":
                         headline_edit = st.text_input("Headline", value=record["headline"] or "", key=f"headline-edit-{record['accident_id']}")
                         accident_date_edit = st.text_input("Accident date", value=record["accident_date"] or "", key=f"date-edit-{record['accident_id']}")
                         published_edit = st.text_input("Publication date", value=record["published_date"] or "", key=f"published-edit-{record['accident_id']}")
+                        state_edit = st.text_input("State", value=record.get("state") or "", key=f"state-edit-{record['accident_id']}")
                         district_edit = st.text_input("District", value=record["district"] or "", key=f"district-edit-{record['accident_id']}")
                         area_edit = st.text_input("Area", value=record["area"] or "", key=f"area-edit-{record['accident_id']}")
                         type_edit = st.text_input("Accident type", value=record["accident_type"] or "", key=f"type-edit-{record['accident_id']}")
@@ -725,6 +760,7 @@ elif page == "Yearly data":
                                 "headline": headline_edit,
                                 "accident_date": accident_date_edit,
                                 "published_date": published_edit,
+                                "state": state_edit,
                                 "district": district_edit,
                                 "area": area_edit,
                                 "accident_type": type_edit,

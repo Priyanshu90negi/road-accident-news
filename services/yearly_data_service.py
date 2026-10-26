@@ -24,7 +24,7 @@ ALL_YEARS_EXPORT_PATH = Path(os.environ.get("ACCIDENT_ALL_YEARS_CSV", PROJECT_RO
 MISSING_TEXT = {"", "unknown", "n/a", "na", "null", "none", "nan"}
 EDITABLE_RECORD_FIELDS = (
     "headline", "published_date", "language", "source_name", "source_url", "accident_date",
-    "accident_time", "district", "area", "accident_type", "cause", "cause_status",
+    "accident_time", "state", "district", "area", "accident_type", "cause", "cause_status",
     "vehicles_involved", "deaths", "injuries", "weather", "review_status",
 )
 
@@ -149,10 +149,12 @@ def normalize_record(
             raise ValueError("Language must be English or Hindi.")
     result["language"] = language
     for field in (
-        "source_name", "source_url", "accident_time", "district", "area", "accident_type",
+        "source_name", "source_url", "accident_time", "state", "district", "area", "accident_type",
         "cause", "cause_status", "vehicles_involved", "weather",
     ):
         result[field] = _optional_text(normalized.get(field))
+    if not result["state"] and result["district"] and result["district"].casefold() == "dehradun":
+        result["state"] = "Uttarakhand"
     if result["accident_time"] and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", result["accident_time"]):
         raise ValueError("Accident time must use 24-hour HH:MM format or be blank if unknown.")
     if result["source_url"]:
@@ -271,6 +273,7 @@ def add_records(
             prepared.append(normalized)
         except ValueError as error:
             validation_errors.append(f"Record {index}: {error}")
+            LOGGER.warning("Rejected accident record %s during validation: %s", index, error)
 
     try:
         db_result = db.insert_accident_records(prepared, db_path) if prepared else {"inserted_ids": [], "skipped": 0, "years": set()}
@@ -356,7 +359,7 @@ def update_record(
             extracted = {}
         sources = {}
         for field in (
-            "accident_date", "accident_time", "district", "area", "accident_type", "cause",
+            "accident_date", "accident_time", "state", "district", "area", "accident_type", "cause",
             "vehicles_involved", "deaths", "injuries", "weather",
         ):
             automatic = extracted.get(field)
