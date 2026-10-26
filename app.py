@@ -11,6 +11,7 @@ import streamlit as st
 from database import db
 from database.db import DuplicateArticleError
 from services import article_service, export_service, extraction_service, screenshot_service, yearly_data_service
+from services.extraction_compat import invoke_article_extractor
 from services.yearly_data_service import YearlyCsvSyncError
 
 
@@ -543,8 +544,10 @@ elif page == "Review records":
                 diagnostics: list[str] = []
                 should_rerun = False
                 try:
-                    records = extraction_service.extract_and_save_article(
-                        selected_id, diagnostics=diagnostics
+                    records = invoke_article_extractor(
+                        extraction_service.extract_and_save_article,
+                        selected_id,
+                        diagnostics,
                     )
                     st.session_state[f"extraction-diagnostics-{selected_id}"] = diagnostics
                     if records:

@@ -16,6 +16,7 @@ from database.db import DuplicateArticleError
 from nlp.pipeline import extract_accidents
 from nlp.evaluate import evaluate_file
 from services import article_service, export_service, extraction_service
+from services.extraction_compat import invoke_article_extractor
 
 
 class ManualWorkflowTests(unittest.TestCase):
@@ -145,8 +146,8 @@ class ManualWorkflowTests(unittest.TestCase):
         diagnostics: list[str] = []
         with patch.dict(os.environ, {"ACCIDENT_NEWS_DB": str(self.database)}):
             with patch("services.extraction_service.extract_accidents", wraps=extract_accidents) as extractor:
-                records = extraction_service.extract_and_save_article(
-                    article_id, diagnostics=diagnostics
+                records = invoke_article_extractor(
+                    extraction_service.extract_and_save_article, article_id, diagnostics
                 )
 
         self.assertEqual(len(records), 1)
@@ -184,8 +185,8 @@ class ManualWorkflowTests(unittest.TestCase):
 
         diagnostics: list[str] = []
         with patch.dict(os.environ, {"ACCIDENT_NEWS_DB": str(self.database)}):
-            records = extraction_service.extract_and_save_article(
-                article_id, diagnostics=diagnostics
+            records = invoke_article_extractor(
+                extraction_service.extract_and_save_article, article_id, diagnostics
             )
 
         self.assertEqual(len(records), 1)
@@ -259,6 +260,18 @@ class ManualWorkflowTests(unittest.TestCase):
         self.assertEqual(records, [])
         self.assertTrue(any("Record rejected during validation" in item for item in diagnostics))
         self.assertTrue(any("zero records were accepted" in item for item in diagnostics))
+
+    def test_run_extraction_call_handles_legacy_service_without_diagnostics_keyword(self):
+        def legacy_extractor(article_id):
+            return [{"article_id": article_id}]
+
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'diagnostics'"):
+            legacy_extractor(17, diagnostics=[])
+
+        diagnostics: list[str] = []
+        records = invoke_article_extractor(legacy_extractor, 17, diagnostics)
+        self.assertEqual(records, [{"article_id": 17}])
+        self.assertTrue(any("does not accept diagnostics" in item for item in diagnostics))
 
     def test_hindi_dates_times_numbers_and_unicode(self):
         text = "9 जून 2025 को देहरादून में सड़क हादसा हुआ। दो लोग घायल हुए और एक व्यक्ति की मौत हो गई। रात 10 बजे बस और कार टकराईं।"
