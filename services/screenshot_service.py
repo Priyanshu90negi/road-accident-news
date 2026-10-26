@@ -19,6 +19,11 @@ from urllib.parse import urlsplit
 
 from PIL import Image, ImageOps
 
+try:
+    import pytesseract
+except ImportError:  # Direct subprocess OCR remains available in minimal installations.
+    pytesseract = None
+
 from database import db
 from database.db import DuplicateArticleError, DuplicateScreenshotError
 from nlp.pipeline import extract_accidents
@@ -33,6 +38,7 @@ DEFAULT_SCREENSHOT_DIR = Path(
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_IMAGE_PIXELS = 50_000_000
+DEFAULT_TESSERACT_FALLBACK = Path(r"D:\tesseract\tesseract.exe")
 
 
 class OCRUnavailableError(RuntimeError):
@@ -47,38 +53,140 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _tesseract_binary() -> str:
-    configured = os.environ.get("TESSERACT_CMD")
-    if configured:
-        return configured
-    discovered = shutil.which("tesseract")
-    if discovered:
-        return discovered
-    candidates = (
-        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
-        Path(r"D:\tesseract\tesseract.exe"),
-        Path("/usr/bin/tesseract"),
-        Path("/usr/local/bin/tesseract"),
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return str(candidate)
-    raise OCRUnavailableError(
-        "Tesseract OCR was not found. Install it with English and Hindi language data, "
-        "or set TESSERACT_CMD to the executable path."
-    )
+def _configure_pytesseract(binary: str) -> None:
+    if pytesseract is not None:
+        pytesseract.pytesseract.tesseract_cmd = binary
 
 
-def tesseract_languages() -> set[str]:
-    binary = _tesseract_binary()
+def _validate_tesseract_binary(binary: str, source: str) -> str:
+    executable = str(Path(binary).expanduser())
     try:
         result = subprocess.run(
-            [binary, "--list-langs"], capture_output=True, check=True,
+            [executable, "--version"], capture_output=True, check=False,
+            text=True, encoding="utf-8", errors="replace", timeout=10,
+        )
+    except FileNotFoundError as error:
+        raise OCRUnavailableError(
+            f"Tesseract executable from {source} was not found: {executable}. "
+            "Check the path or update TESSERACT_CMD."
+        ) from error
+    except PermissionError as error:
+        raise OCRUnavailableError(
+            f"Tesseract executable from {source} cannot be run: {executable}. "
+            "Check its permissions."
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise OCRUnavailableError(
+            f"Tesseract executable from {source} did not respond to --version within 10 seconds: {executable}."
+        ) from error
+    except OSError as error:
+        raise OCRUnavailableError(
+            f"Tesseract executable from {source} could not be started: {executable}: {error}"
+        ) from error
+
+    version_output = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0 or not version_output:
+        detail = version_output or "Tesseract returned no version information."
+        raise OCRUnavailableError(
+            f"Tesseract executable from {source} failed its --version check "
+            f"(exit code {result.returncode}): {detail}"
+        )
+    _configure_pytesseract(executable)
+    return executable
+
+
+def _tesseract_binary() -> str:
+    configured = os.environ.get("TESSERACT_CMD", "").strip().strip('"')
+    if configured:
+        return _validate_tesseract_binary(configured, "TESSERACT_CMD")
+
+    discovered = shutil.which("tesseract")
+    discovery_error = None
+    if discovered:
+        try:
+            return _validate_tesseract_binary(discovered, "PATH discovery")
+        except OCRUnavailableError as error:
+            discovery_error = error
+
+    configured_fallback = os.environ.get("TESSERACT_FALLBACK_CMD", "").strip().strip('"')
+    if configured_fallback:
+        fallbacks = (Path(configured_fallback).expanduser(),)
+    else:
+        fallbacks = (
+            DEFAULT_TESSERACT_FALLBACK,
+            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+            Path("/usr/bin/tesseract"),
+            Path("/usr/local/bin/tesseract"),
+        )
+    for fallback in fallbacks:
+        if fallback.is_file():
+            return _validate_tesseract_binary(str(fallback), "TESSERACT_FALLBACK_CMD")
+    checked = ", ".join(str(path) for path in fallbacks)
+    if discovery_error:
+        raise OCRUnavailableError(
+            f"{discovery_error} No usable fallback was found. Checked: {checked}."
+        ) from discovery_error
+    raise OCRUnavailableError(
+        "Tesseract OCR was not found on PATH or at a configured fallback. "
+        f"Checked: {checked}. Set TESSERACT_CMD to an executable path."
+    )
+
+
+def _tesseract_language_info(binary: str) -> tuple[set[str], Path | None]:
+    try:
+        result = subprocess.run(
+            [binary, "--list-langs"], capture_output=True, check=False,
             text=True, encoding="utf-8", errors="replace", timeout=20,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise OCRUnavailableError(f"Could not inspect Tesseract language data: {error}") from error
-    return {line.strip() for line in result.stdout.splitlines()[1:] if line.strip()}
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "Tesseract returned an error.").strip()
+        raise OCRUnavailableError(f"Could not inspect Tesseract language data: {detail}")
+
+    lines = result.stdout.splitlines()
+    directory = None
+    if lines:
+        match = re.search(r'available languages in\s+["\'](.+?)["\']', lines[0], re.IGNORECASE)
+        if match:
+            directory = Path(match.group(1)).expanduser()
+    languages = {line.strip() for line in lines[1:] if line.strip()}
+    return languages, directory
+
+
+def _tessdata_directories(binary: str, reported_directory: Path | None) -> list[Path]:
+    candidates: list[Path] = []
+    if reported_directory is not None:
+        candidates.append(reported_directory)
+    configured_prefix = os.environ.get("TESSDATA_PREFIX", "").strip().strip('"')
+    if configured_prefix:
+        prefix = Path(configured_prefix).expanduser()
+        candidates.extend((prefix, prefix / "tessdata"))
+    executable_directory = Path(binary).expanduser().parent
+    candidates.extend((executable_directory / "tessdata", executable_directory))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(str(candidate))
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _missing_required_language_files(binary: str, reported_directory: Path | None) -> list[str]:
+    directories = _tessdata_directories(binary, reported_directory)
+    missing = []
+    for language in ("eng", "hin"):
+        if not any((directory / f"{language}.traineddata").is_file() for directory in directories):
+            missing.append(f"{language}.traineddata")
+    return missing
+
+
+def tesseract_languages() -> set[str]:
+    binary = _tesseract_binary()
+    languages, _ = _tesseract_language_info(binary)
+    return languages
 
 
 def _run_tesseract(args: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -132,12 +240,16 @@ def ocr_image(image_bytes: bytes, filename: str = "screenshot.png") -> dict[str,
     """Preprocess and OCR one image; retain low-confidence and unreadable outcomes."""
     try:
         binary = _tesseract_binary()
-        available = tesseract_languages()
+        available, data_directory = _tesseract_language_info(binary)
         missing = {"eng", "hin"} - available
-        if missing:
-            raise OCRUnavailableError(
-                "Tesseract is missing required language data: " + ", ".join(sorted(missing))
-            )
+        missing_files = _missing_required_language_files(binary, data_directory)
+        if missing or missing_files:
+            details = []
+            if missing:
+                details.append("language codes not listed: " + ", ".join(sorted(missing)))
+            if missing_files:
+                details.append("trained-data files not found: " + ", ".join(missing_files))
+            raise OCRUnavailableError("Tesseract is missing required language data (" + "; ".join(details) + ").")
         image = _preprocess_image(image_bytes)
         with tempfile.TemporaryDirectory(prefix="accident-ocr-") as temp_dir:
             input_path = Path(temp_dir) / "preprocessed.png"

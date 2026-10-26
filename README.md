@@ -34,6 +34,12 @@ launching the app:
 $env:TESSERACT_CMD = "C:\Program Files\Tesseract-OCR\tesseract.exe"
 ```
 
+The app checks that the selected executable runs with `--version`, configures
+`pytesseract` to use it, and verifies the `eng` and `hin` language codes and
+trained-data files. If Tesseract is absent from `PATH` and `TESSERACT_CMD` is
+unset, it checks `D:\tesseract\tesseract.exe`. Override that fallback when
+needed with `TESSERACT_FALLBACK_CMD`.
+
 Then start the app using the setup command above. In **Upload News Screenshot**:
 
 1. Upload one or more screenshots and enter any known article metadata.

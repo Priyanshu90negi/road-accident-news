@@ -4,4 +4,5 @@ beautifulsoup4>=4.12,<5
 pandas>=2.2,<4
 streamlit>=1.39,<2
 Pillow>=10,<13
+pytesseract>=0.3.13,<0.4
 pytest>=8,<9

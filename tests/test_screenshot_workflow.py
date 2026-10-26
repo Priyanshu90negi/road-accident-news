@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image, ImageFilter
@@ -132,6 +135,70 @@ class ScreenshotWorkflowTests(unittest.TestCase):
         extracted = screenshot_service.extract_draft_records(screenshot_id, self.database)
         self.assertEqual(len(extracted), 1)
 
+    def test_tesseract_discovery_configures_pytesseract_command(self):
+        pytesseract_stub = SimpleNamespace(pytesseract=SimpleNamespace(tesseract_cmd=""))
+        version_result = subprocess.CompletedProcess(
+            [r"D:\tesseract\tesseract.exe", "--version"], 0,
+            stdout="tesseract v5.5.3\n", stderr="",
+        )
+        with (
+            patch.dict(os.environ, {"TESSERACT_CMD": "", "TESSERACT_FALLBACK_CMD": ""}),
+            patch("services.screenshot_service.shutil.which", return_value=r"D:\tesseract\tesseract.exe"),
+            patch("services.screenshot_service.subprocess.run", return_value=version_result) as run,
+            patch("services.screenshot_service.pytesseract", pytesseract_stub),
+        ):
+            binary = screenshot_service._tesseract_binary()
+
+        self.assertEqual(binary, r"D:\tesseract\tesseract.exe")
+        self.assertEqual(pytesseract_stub.pytesseract.tesseract_cmd, binary)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], [binary, "--version"])
+
+    def test_tesseract_uses_configured_fallback_when_path_discovery_fails(self):
+        fallback = self.root / "fallback" / "tesseract.exe"
+        fallback.parent.mkdir()
+        fallback.write_bytes(b"test executable placeholder")
+        pytesseract_stub = SimpleNamespace(pytesseract=SimpleNamespace(tesseract_cmd=""))
+        version_result = subprocess.CompletedProcess(
+            [str(fallback), "--version"], 0, stdout="tesseract v5.5.3\n", stderr="",
+        )
+        with (
+            patch.dict(os.environ, {
+                "TESSERACT_CMD": "", "TESSERACT_FALLBACK_CMD": str(fallback),
+            }),
+            patch("services.screenshot_service.shutil.which", return_value=None),
+            patch("services.screenshot_service.subprocess.run", return_value=version_result),
+            patch("services.screenshot_service.pytesseract", pytesseract_stub),
+        ):
+            binary = screenshot_service._tesseract_binary()
+
+        self.assertEqual(binary, str(fallback))
+        self.assertEqual(pytesseract_stub.pytesseract.tesseract_cmd, str(fallback))
+
+    def test_invalid_tesseract_override_has_actionable_error(self):
+        configured = str(self.root / "missing" / "tesseract.exe")
+        with (
+            patch.dict(os.environ, {"TESSERACT_CMD": configured}),
+            patch("services.screenshot_service.subprocess.run", side_effect=FileNotFoundError(configured)),
+        ):
+            with self.assertRaises(screenshot_service.OCRUnavailableError) as error:
+                screenshot_service._tesseract_binary()
+
+        self.assertIn("TESSERACT_CMD", str(error.exception))
+        self.assertIn(configured, str(error.exception))
+
+    def test_ocr_reports_missing_language_codes_and_trained_data_files(self):
+        with (
+            patch.dict(os.environ, {"TESSDATA_PREFIX": ""}),
+            patch("services.screenshot_service._tesseract_binary", return_value=str(self.root / "tesseract.exe")),
+            patch("services.screenshot_service._tesseract_language_info", return_value=({"eng"}, None)),
+        ):
+            result = screenshot_service.ocr_image(b"not needed when language data is incomplete")
+
+        self.assertEqual(result["readability_status"], "unreadable")
+        self.assertIn("language codes not listed: hin", result["ocr_error"])
+        self.assertIn("hin.traineddata", result["ocr_error"])
+
     def test_conflicting_counts_and_missing_dates_are_not_invented(self):
         conflict_text = (
             "A Dehradun crash occurred on 2025-02-03. Two people were injured, "
@@ -252,6 +319,17 @@ class ScreenshotWorkflowTests(unittest.TestCase):
         self.assertIn("Dehradun", english["raw_ocr_text"])
         self.assertEqual(hindi["readability_status"], "readable")
         self.assertIn("देहरादून", hindi["raw_ocr_text"])
+        sample_upload = (fixture_dir / "ocr_english_smoke.png").read_bytes()
+        screenshot_id = screenshot_service.create_draft(
+            [("sample-news-screenshot.png", sample_upload)],
+            {"headline": "Sample road accident report", "language": "English"},
+            image_root=self.images,
+            db_path=self.database,
+        )
+        uploaded_draft = screenshot_service.get_draft(screenshot_id, self.database)
+        self.assertIn("Dehradun", uploaded_draft["raw_ocr_text"])
+        self.assertIn("Dehradun", uploaded_draft["pages"][0]["raw_ocr_text"])
+
         english_image = Image.open(fixture_dir / "ocr_english_smoke.png").filter(ImageFilter.GaussianBlur(radius=8))
         blurry_bytes = BytesIO()
         english_image.save(blurry_bytes, format="PNG")
